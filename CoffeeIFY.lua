@@ -8,8 +8,23 @@ local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
 local TextService = game:GetService("TextService")
 
+-- CoffeeIFY is a client-side UI library. LocalPlayer can briefly be nil
+-- if the library is loaded very early, so wait for it instead of indexing nil.
 local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
+local playerDeadline = os.clock() + 10
+while not player and os.clock() < playerDeadline do
+	task.wait(0.1)
+	player = Players.LocalPlayer
+end
+
+if not player then
+	error("[CoffeeIFY] Players.LocalPlayer is nil. Load CoffeeIFY from the client.", 0)
+end
+
+local playerGui = player:WaitForChild("PlayerGui", 10)
+if not playerGui then
+	error("[CoffeeIFY] PlayerGui did not become available for the local player.", 0)
+end
 
 local oldGui = playerGui:FindFirstChild("CoffeeIFY")
 if oldGui then
@@ -536,8 +551,13 @@ end
 
 function CoffeeIFY:CreateTab(name)
 	if self._closing then
-		return
+		error("[CoffeeIFY] Cannot create a tab after this UI has been closed.", 2)
 	end
+
+	if name == nil then
+		error("[CoffeeIFY] CreateTab requires a tab name.", 2)
+	end
+	name = tostring(name)
 
 	if self.tabs[name] then
 		warn(("CoffeeIFY: tab '%s' already exists."):format(name))
@@ -2051,4 +2071,7 @@ function CoffeeIFY:Notify(opts, durationOrOpts, extra)
 end
 
 
+-- Export the API table expected by loadstring(... )().
+assert(type(CoffeeIFY) == "table" and type(CoffeeIFY.new) == "function",
+	"[CoffeeIFY] Library export is invalid; expected CoffeeIFY.new(config).")
 return CoffeeIFY
