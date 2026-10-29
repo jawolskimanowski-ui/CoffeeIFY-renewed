@@ -1,30 +1,19 @@
 local CoffeeIFY = {}
 CoffeeIFY.__index = CoffeeIFY
+CoffeeIFY.Flags = {}
+CoffeeIFY.Hooks = {}
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
+local Debris = game:GetService("Debris")
 local TextService = game:GetService("TextService")
 
--- CoffeeIFY is a client-side UI library. LocalPlayer can briefly be nil
--- if the library is loaded very early, so wait for it instead of indexing nil.
 local player = Players.LocalPlayer
-local playerDeadline = os.clock() + 10
-while not player and os.clock() < playerDeadline do
-	task.wait(0.1)
-	player = Players.LocalPlayer
-end
-
-if not player then
-	error("[CoffeeIFY] Players.LocalPlayer is nil. Load CoffeeIFY from the client.", 0)
-end
-
-local playerGui = player:WaitForChild("PlayerGui", 10)
-if not playerGui then
-	error("[CoffeeIFY] PlayerGui did not become available for the local player.", 0)
-end
+local playerGui = player:WaitForChild("PlayerGui")
+local activeInstance = nil
 
 local oldGui = playerGui:FindFirstChild("CoffeeIFY")
 if oldGui then
@@ -58,20 +47,47 @@ local HOVER_SOUND = 408524543
 local CLICK_SOUND = 4307186075
 
 local function PlaySound(id, volume)
+	if CoffeeIFY.Flags and CoffeeIFY.Flags.Sounds == false then
+		return nil
+	end
+
 	local sound = Instance.new("Sound")
 	sound.SoundId = "rbxassetid://" .. tostring(id)
 	sound.Volume = volume or 0.4
 	sound.PlaybackSpeed = 1
 	sound.Parent = SoundService
-	sound:Play()
 
+	-- Debris is a fallback for deleted/private assets that never fire Ended.
+	Debris:AddItem(sound, 8)
 	sound.Ended:Connect(function()
-		if sound then
+		if sound.Parent then
 			sound:Destroy()
 		end
 	end)
 
+	local ok, err = pcall(function()
+		sound:Play()
+	end)
+	if not ok then
+		warn("[CoffeeIFY] Sound failed:", err)
+		sound:Destroy()
+		return nil
+	end
+
 	return sound
+end
+
+local function RunCallback(callback, ...)
+	if type(callback) ~= "function" then
+		return
+	end
+	local args = table.pack(...)
+	task.spawn(function()
+		local ok, err = pcall(callback, table.unpack(args, 1, args.n))
+		if not ok then
+			warn("[CoffeeIFY] Callback error:", err)
+		end
+	end)
 end
 
 local function BindActivated(button, callback)
@@ -103,7 +119,9 @@ local function GetPageWidth(page, fallback)
 			if rootWidth <= 0 then
 				rootWidth = ancestor.Size.X.Offset
 			end
-			return math.max(rootWidth - 114, 120)
+			-- Main content begins after the 112px sidebar; the page has 16px
+			-- horizontal insets. Keep the fallback aligned with that geometry.
+			return math.max(rootWidth - 128, 80)
 		end
 	end
 
@@ -118,6 +136,12 @@ function CoffeeIFY:_Track(connection)
 end
 
 function CoffeeIFY:_CleanupConnections()
+	if self._activeKeybindCancel then
+		local cancelCapture = self._activeKeybindCancel
+		self._activeKeybindCancel = nil
+		pcall(cancelCapture)
+	end
+
 	if self._connections then
 		for _, connection in ipairs(self._connections) do
 			if connection and connection.Connected then
@@ -129,8 +153,10 @@ function CoffeeIFY:_CleanupConnections()
 
 	for _, sound in ipairs(self._sounds or {}) do
 		if sound then
-			sound:Stop()
-			sound:Destroy()
+			pcall(function()
+				sound:Stop()
+				sound:Destroy()
+			end)
 		end
 	end
 	if self._sounds then
@@ -155,6 +181,22 @@ end
 function CoffeeIFY.new(config)
 	config = config or {}
 
+	-- Keep the library singleton-like: rebuilding a window must not leave
+	-- the prior UI's RenderStepped/input listeners active behind it.
+	if activeInstance then
+		local previous = activeInstance
+		activeInstance = nil
+		previous._closing = true
+		previous:_CleanupConnections()
+		if previous.gui then
+			pcall(function() previous.gui:Destroy() end)
+		end
+	end
+	local staleGui = playerGui:FindFirstChild("CoffeeIFY")
+	if staleGui then
+		staleGui:Destroy()
+	end
+
 	local self = setmetatable({}, CoffeeIFY)
 
 	self._connections = {}
@@ -171,6 +213,7 @@ function CoffeeIFY.new(config)
 		DisplayOrder = 50,
 		Parent = playerGui
 	})
+	activeInstance = self
 
 	local cam = workspace.CurrentCamera
 	while not cam do
@@ -230,11 +273,7 @@ function CoffeeIFY.new(config)
 		Parent = self.gui
 	})
 
-	Create("UIStroke", {
-		Color = Color3.fromRGB(170, 160, 140),
-		Thickness = 1.5,
-		Parent = self.main
-	})
+	-- main outline removed
 
 	self.topBar = Create("Frame", {
 		Name = "TopBar",
@@ -451,6 +490,9 @@ function CoffeeIFY.new(config)
 		spinActive = false
 		PlaySound(CLICK_SOUND, 0.45)
 		self:_CleanupConnections()
+		if activeInstance == self then
+			activeInstance = nil
+		end
 
 		if self.gui then
 			self.gui:Destroy()
@@ -551,13 +593,11 @@ end
 
 function CoffeeIFY:CreateTab(name)
 	if self._closing then
-		error("[CoffeeIFY] Cannot create a tab after this UI has been closed.", 2)
+		return
 	end
 
-	if name == nil then
-		error("[CoffeeIFY] CreateTab requires a tab name.", 2)
-	end
-	name = tostring(name)
+	name = tostring(name or "Tab")
+	if name == "" then name = "Tab" end
 
 	if self.tabs[name] then
 		warn(("CoffeeIFY: tab '%s' already exists."):format(name))
@@ -573,17 +613,28 @@ function CoffeeIFY:CreateTab(name)
 
 	local btn = Create("TextButton", {
 		Name = name,
-		Size = UDim2.new(1, -4, 0, TAB_H), -- almost full width of sidebar
+		Size = UDim2.new(1, -4, 0, TAB_H),
 		Position = UDim2.new(0, 2, 0, 6 + (index - 1) * TAB_GAP),
 		BackgroundColor3 = Color3.fromRGB(185, 175, 155),
 		BorderSizePixel = 0,
 		Text = "",
 		AutoButtonColor = false,
 		Rotation = 0,
+		ClipsDescendants = true,
 		Parent = self.sidebar
 	})
 
-	-- top + bottom selection lines (hidden by default)
+	-- dark invasion from left (max 50% of the tab)
+	local invade = Create("Frame", {
+		Name = "Invade",
+		Size = UDim2.new(0, 0, 1, 0),
+		Position = UDim2.new(0, 0, 0, 0),
+		BackgroundColor3 = Color3.fromRGB(48, 43, 38),
+		BorderSizePixel = 0,
+		ZIndex = 1,
+		Parent = btn
+	})
+
 	local topLine = Create("Frame", {
 		Name = "TopLine",
 		Size = UDim2.new(1, 0, 0, 1.5),
@@ -591,6 +642,7 @@ function CoffeeIFY:CreateTab(name)
 		BackgroundColor3 = Color3.fromRGB(42, 38, 34),
 		BorderSizePixel = 0,
 		Visible = false,
+		ZIndex = 3,
 		Parent = btn
 	})
 
@@ -601,6 +653,7 @@ function CoffeeIFY:CreateTab(name)
 		BackgroundColor3 = Color3.fromRGB(42, 38, 34),
 		BorderSizePixel = 0,
 		Visible = false,
+		ZIndex = 3,
 		Parent = btn
 	})
 
@@ -609,6 +662,7 @@ function CoffeeIFY:CreateTab(name)
 		Position = UDim2.new(0, 8, 0.5, -3.5),
 		BackgroundColor3 = Color3.fromRGB(70, 60, 50),
 		BorderSizePixel = 0,
+		ZIndex = 4,
 		Parent = btn
 	})
 
@@ -621,6 +675,7 @@ function CoffeeIFY:CreateTab(name)
 		Font = Enum.Font.GothamMedium,
 		TextSize = 11,
 		TextXAlignment = Enum.TextXAlignment.Left,
+		ZIndex = 4,
 		Parent = btn
 	})
 
@@ -657,7 +712,8 @@ function CoffeeIFY:CreateTab(name)
 		Page = page,
 		Name = name,
 		TopLine = topLine,
-		BottomLine = bottomLine
+		BottomLine = bottomLine,
+		Invade = invade,
 	}
 
 	self.tabs[name] = tabData
@@ -762,21 +818,24 @@ function CoffeeIFY:CreateTab(name)
 			}, 0.22)
 			Tween(t.Label, {TextColor3 = Color3.fromRGB(45, 40, 35)}, 0.2)
 			Tween(t.Icon, {BackgroundColor3 = Color3.fromRGB(70, 60, 50)}, 0.2)
+			if t.Invade then
+				Tween(t.Invade, { Size = UDim2.new(0, 0, 1, 0) }, 0.18)
+			end
 			if t.TopLine then t.TopLine.Visible = false end
 			if t.BottomLine then t.BottomLine.Visible = false end
 			t.Page.Visible = false
 		end
 
-		-- selected tab
+		-- selected tab: dark only covers 50% from the left
 		Tween(btn, {
-			BackgroundColor3 = Color3.fromRGB(48, 43, 38),
+			BackgroundColor3 = Color3.fromRGB(185, 175, 155),
 			Rotation = 0,
 			Position = UDim2.new(0, 2, 0, 6 + (index - 1) * 26)
 		}, 0.22)
-		Tween(label, {TextColor3 = Color3.fromRGB(230, 220, 200)}, 0.22)
+		Tween(invade, { Size = UDim2.new(0.5, 0, 1, 0) }, 0.22)
+		Tween(label, {TextColor3 = Color3.fromRGB(40, 35, 30)}, 0.22)
 		Tween(icon, {BackgroundColor3 = Color3.fromRGB(230, 220, 200)}, 0.22)
 
-		-- show top + bottom dark lines on selected tab
 		topLine.Visible = true
 		bottomLine.Visible = true
 
@@ -806,7 +865,10 @@ function CoffeeIFY:CreateTab(name)
 		PlaySound(HOVER_SOUND, 0.18)
 
 		if self.currentTab ~= tabData then
-			Tween(btn, {BackgroundColor3 = Color3.fromRGB(200, 190, 170)}, 0.15)
+			Tween(invade, { Size = UDim2.new(0.5, 0, 1, 0) }, 0.16)
+			Tween(icon, { BackgroundColor3 = Color3.fromRGB(200, 185, 160) }, 0.16)
+		else
+			Tween(icon, { BackgroundColor3 = Color3.fromRGB(255, 245, 220) }, 0.16)
 		end
 	end))
 
@@ -814,7 +876,11 @@ function CoffeeIFY:CreateTab(name)
 		if self._closing then return end
 
 		if self.currentTab ~= tabData then
-			Tween(btn, {BackgroundColor3 = Color3.fromRGB(185, 175, 155)}, 0.15)
+			Tween(invade, { Size = UDim2.new(0, 0, 1, 0) }, 0.16)
+			Tween(icon, { BackgroundColor3 = Color3.fromRGB(70, 60, 50) }, 0.16)
+		else
+			Tween(invade, { Size = UDim2.new(0.5, 0, 1, 0) }, 0.16)
+			Tween(icon, { BackgroundColor3 = Color3.fromRGB(230, 220, 200) }, 0.16)
 		end
 	end))
 
@@ -842,7 +908,17 @@ function CoffeeIFY:CreateButton(tab, text, callback)
 		Position = UDim2.new(0, 6, 0, 0),
 		BackgroundColor3 = Color3.fromRGB(218, 208, 188),
 		BorderSizePixel = 0,
+		ClipsDescendants = true,
 		Parent = page
+	})
+
+	local invade = Create("Frame", {
+		Name = "Invade",
+		Size = UDim2.new(0, 0, 1, 0),
+		BackgroundColor3 = Color3.fromRGB(48, 43, 38),
+		BorderSizePixel = 0,
+		ZIndex = 1,
+		Parent = frame
 	})
 
 	local box = Create("Frame", {
@@ -850,6 +926,7 @@ function CoffeeIFY:CreateButton(tab, text, callback)
 		Position = UDim2.new(0, 14, 0.5, -6),
 		BackgroundColor3 = Color3.fromRGB(40, 35, 30),
 		BorderSizePixel = 0,
+		ZIndex = 3,
 		Parent = frame
 	})
 
@@ -864,6 +941,7 @@ function CoffeeIFY:CreateButton(tab, text, callback)
 		TextWrapped = true,
 		TextYAlignment = Enum.TextYAlignment.Center,
 		TextXAlignment = Enum.TextXAlignment.Left,
+		ZIndex = 3,
 		Parent = frame
 	})
 
@@ -872,33 +950,31 @@ function CoffeeIFY:CreateButton(tab, text, callback)
 		BackgroundTransparency = 1,
 		Text = "",
 		AutoButtonColor = false,
+		ZIndex = 4,
 		Parent = frame
 	})
 
 	local hovering = false
 
 	local function resetVisual()
-		Tween(frame, {
-			BackgroundColor3 = Color3.fromRGB(218, 208, 188),
-			Position = UDim2.new(0, 6, 0, 0)
-		}, 0.15)
+		Tween(invade, { Size = UDim2.new(0, 0, 1, 0) }, 0.15)
 		Tween(box, {
 			BackgroundColor3 = Color3.fromRGB(40, 35, 30),
 			Size = UDim2.new(0, 12, 0, 12),
 			Position = UDim2.new(0, 14, 0.5, -6)
 		}, 0.15)
-		label.TextXAlignment = Enum.TextXAlignment.Left
-		Tween(label, {
-			Position = UDim2.new(0, 32, 0, 2),
-			Size = UDim2.new(1, -72, 0, math.max(18, rowHeight - 4))
-		}, 0.15)
+		Tween(label, { TextColor3 = Color3.fromRGB(40, 35, 30) }, 0.15)
 	end
 
 	self:_Track(btn.MouseEnter:Connect(function()
 		hovering = true
 		PlaySound(HOVER_SOUND, 0.22)
-		Tween(frame, {BackgroundColor3 = Color3.fromRGB(230, 220, 200)}, 0.15)
-		Tween(box, {Size = UDim2.new(0, 13, 0, 13), Position = UDim2.new(0, 13.5, 0.5, -6.5)}, 0.15)
+		Tween(invade, { Size = UDim2.new(0.5, 0, 1, 0) }, 0.16)
+		Tween(box, {
+			BackgroundColor3 = Color3.fromRGB(230, 220, 200),
+			Size = UDim2.new(0, 13, 0, 13),
+			Position = UDim2.new(0, 13.5, 0.5, -6.5)
+		}, 0.15)
 	end))
 
 	self:_Track(btn.MouseLeave:Connect(function()
@@ -930,9 +1006,7 @@ function CoffeeIFY:CreateButton(tab, text, callback)
 			end
 		end)
 
-		if callback then
-			task.spawn(callback)
-		end
+		RunCallback(callback)
 	end))
 
 	return frame
@@ -1026,9 +1100,7 @@ function CoffeeIFY:CreateToggle(tab, text, default, callback)
 			end
 		end)
 
-		if callback then
-			task.spawn(callback, state)
-		end
+		RunCallback(callback, state)
 	end))
 
 	return frame
@@ -1045,17 +1117,17 @@ function CoffeeIFY:CreateSlider(tab, text, min, max, default, callback)
 		min, max = max, min
 	end
 
-	if max == min then
-		max = min + 1
-	end
-
+	local fixedRange = max == min
 	local value = math.clamp(tonumber(default) or min, min, max)
 	local pageWidth = GetPageWidth(page, 260)
+	local compact = pageWidth < 200
 	local naturalWidth = MeasureText(text, Enum.Font.Gotham, 12, 10000)
-	local labelWidth = math.clamp(math.ceil(naturalWidth + 28), 70, math.floor(pageWidth * 0.5))
-	local _, textHeight = MeasureText(text, Enum.Font.Gotham, 12, math.max(labelWidth - 18, 40))
-	local rowHeight = math.max(26, textHeight + 10)
-	local barWidth = math.max(64, pageWidth - labelWidth - 28)
+	local maxLabelWidth = math.max(40, math.floor(pageWidth * 0.5))
+	local minLabelWidth = math.min(70, maxLabelWidth)
+	local labelWidth = math.clamp(math.ceil(naturalWidth + 28), minLabelWidth, maxLabelWidth)
+	local _, textHeight = MeasureText(text, Enum.Font.Gotham, 12, compact and math.max(pageWidth - 36, 40) or math.max(labelWidth - 18, 40))
+	local rowHeight = compact and math.max(42, textHeight + 28) or math.max(26, textHeight + 10)
+	local barWidth = compact and math.max(36, pageWidth - 24) or math.max(64, pageWidth - labelWidth - 28)
 
 	local frame = Create("Frame", {
 		Size = UDim2.new(1, 0, 0, rowHeight),
@@ -1076,10 +1148,10 @@ function CoffeeIFY:CreateSlider(tab, text, min, max, default, callback)
 		Parent = frame
 	})
 
-	Create("TextLabel", {
+	local sliderLabel = Create("TextLabel", {
 		Text = text,
-		Size = UDim2.new(0, labelWidth - 18, 1, -4),
-		Position = UDim2.new(0, 22, 0, 2),
+		Size = compact and UDim2.new(1, -32, 0, math.max(18, textHeight)) or UDim2.new(0, labelWidth - 18, 1, -4),
+		Position = compact and UDim2.new(0, 22, 0, 0) or UDim2.new(0, 22, 0, 2),
 		BackgroundTransparency = 1,
 		TextColor3 = Color3.fromRGB(40, 35, 30),
 		Font = Enum.Font.Gotham,
@@ -1091,15 +1163,15 @@ function CoffeeIFY:CreateSlider(tab, text, min, max, default, callback)
 	})
 
 	local bar = Create("Frame", {
-		Size = UDim2.new(0, barWidth, 0, 3),
-		Position = UDim2.new(1, -barWidth - 12, 0.5, -1.5),
+		Size = compact and UDim2.new(1, -24, 0, 3) or UDim2.new(0, barWidth, 0, 3),
+		Position = compact and UDim2.new(0, 12, 0, rowHeight - 8) or UDim2.new(1, -barWidth - 12, 0.5, -1.5),
 		BackgroundColor3 = Color3.fromRGB(155, 145, 125),
 		BorderSizePixel = 0,
 		Active = true,
 		Parent = frame
 	})
 
-	local normalized = (value - min) / (max - min)
+	local normalized = if max == min then 0 else (value - min) / (max - min)
 
 	local fill = Create("Frame", {
 		Size = UDim2.new(normalized, 0, 1, 0),
@@ -1145,20 +1217,21 @@ function CoffeeIFY:CreateSlider(tab, text, min, max, default, callback)
 		local width = bar.AbsoluteSize.X
 		if width <= 0 then return end
 
+		if fixedRange then return end
 		local rel = math.clamp((x - bar.AbsolutePosition.X) / width, 0, 1)
-		value = math.floor(min + (max - min) * rel + 0.5)
+		local nextValue = math.floor(min + (max - min) * rel + 0.5)
+		if nextValue == value then return end
+		value = nextValue
 
 		local current = (value - min) / (max - min)
 		fill.Size = UDim2.new(current, 0, 1, 0)
 		knob.Position = UDim2.new(current, -5, 0.5, -5)
 
-		if callback then
-			task.spawn(callback, value)
-		end
+		RunCallback(callback, value)
 	end
 
 	local function beginSlider(input)
-		if self._closing then return end
+		if self._closing or fixedRange then return end
 
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = true
@@ -1184,6 +1257,18 @@ function CoffeeIFY:CreateSlider(tab, text, min, max, default, callback)
 			dragging = false
 			stopMech()
 		end
+	end))
+
+	self:_Track(frame.Destroying:Connect(function()
+		dragging = false
+		stopMech()
+		for i, sound in ipairs(self._sounds) do
+			if sound == mechSound then
+				table.remove(self._sounds, i)
+				break
+			end
+		end
+		pcall(function() mechSound:Destroy() end)
 	end))
 
 	return frame
@@ -1221,9 +1306,7 @@ function CoffeeIFY:CreateTextBox(tab, placeholder, callback)
 	})
 
 	self:_Track(box.FocusLost:Connect(function(enter)
-		if callback then
-			task.spawn(callback, box.Text, enter)
-		end
+		RunCallback(callback, box.Text, enter)
 	end))
 
 	return frame, box
@@ -1231,14 +1314,19 @@ end
 
 function CoffeeIFY:CreateLabel(tab, text)
 	local page = self:_GetPage(tab)
+	text = tostring(text or "Label")
+	local pageWidth = GetPageWidth(page, 260)
+	local _, textHeight = MeasureText(text, Enum.Font.Gotham, 11, math.max(pageWidth - 8, 48))
 
 	local label = Create("TextLabel", {
-		Size = UDim2.new(1, 0, 0, 20),
+		Size = UDim2.new(1, 0, 0, math.max(20, textHeight + 4)),
 		BackgroundTransparency = 1,
-		Text = tostring(text or "Label"),
+		Text = text,
 		TextColor3 = Color3.fromRGB(90, 80, 70),
 		Font = Enum.Font.Gotham,
 		TextSize = 11,
+		TextWrapped = true,
+		TextYAlignment = Enum.TextYAlignment.Center,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Parent = page
 	})
@@ -1249,6 +1337,9 @@ end
 function CoffeeIFY:CreateDropdown(tab, text, options, default, callback, theme)
 	local page = self:_GetPage(tab)
 
+	if type(options) ~= "table" then
+		options = nil
+	end
 	options = options or {"Option 1", "Option 2", "Option 3"}
 
 	if #options == 0 then
@@ -1285,20 +1376,35 @@ function CoffeeIFY:CreateDropdown(tab, text, options, default, callback, theme)
 	local open = false
 	local destroyed = false
 	local pageWidth = GetPageWidth(page, 260)
+	local compact = pageWidth < 190
 	local naturalLabelWidth = MeasureText(text or "Dropdown", Enum.Font.Gotham, 12, 10000)
 	local naturalValueWidth = MeasureText(tostring(selected), Enum.Font.GothamMedium, 11, 10000)
-	local labelWidth = math.clamp(math.ceil(naturalLabelWidth + 18), 80, math.floor(pageWidth * 0.52))
-	local valueWidth = math.clamp(math.ceil(naturalValueWidth + 24), 70, math.floor(pageWidth * 0.44))
-	local _, labelHeight = MeasureText(text or "Dropdown", Enum.Font.Gotham, 12, math.max(labelWidth - 18, 40))
-	local _, selectedHeight = MeasureText(tostring(selected), Enum.Font.GothamMedium, 11, math.max(valueWidth - 18, 40))
-	local rowHeight = math.max(26, math.max(labelHeight, selectedHeight) + 8)
+	local maxLabelWidth = math.max(40, math.floor(pageWidth * 0.52))
+	local minLabelWidth = math.min(80, maxLabelWidth)
+	local maxValueWidth = math.max(40, math.floor(pageWidth * 0.44))
+	local minValueWidth = math.min(70, maxValueWidth)
+	local labelWidth = math.clamp(math.ceil(naturalLabelWidth + 18), minLabelWidth, maxLabelWidth)
+	local valueWidth = math.clamp(math.ceil(naturalValueWidth + 24), minValueWidth, maxValueWidth)
+	local _, labelHeight = MeasureText(text or "Dropdown", Enum.Font.Gotham, 12, math.max((compact and pageWidth - 16 or labelWidth - 18), 40))
+	local _, selectedHeight = MeasureText(tostring(selected), Enum.Font.GothamMedium, 11, math.max((compact and pageWidth - 34 or valueWidth - 18), 40))
+	local rowHeight = compact and (math.max(14, labelHeight) + math.max(14, selectedHeight) + 8) or math.max(26, math.max(labelHeight, selectedHeight) + 8)
 
+	-- AutomaticSize so page UIListLayout pushes elements below when opened
 	local frame = Create("Frame", {
-		Size = UDim2.new(1, 0, 0, rowHeight),
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
 		BackgroundColor3 = t.Bg,
 		BorderSizePixel = 0,
 		ClipsDescendants = false,
 		Parent = page
+	})
+
+	Create("UIListLayout", {
+		Name = "RootLayout",
+		FillDirection = Enum.FillDirection.Vertical,
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Padding = UDim.new(0, 0),
+		Parent = frame
 	})
 
 	local mainBtn = Create("TextButton", {
@@ -1307,14 +1413,16 @@ function CoffeeIFY:CreateDropdown(tab, text, options, default, callback, theme)
 		BorderSizePixel = 0,
 		Text = "",
 		AutoButtonColor = false,
+		LayoutOrder = 1,
 		Parent = frame
 	})
 
-	Create("TextLabel", {
+	local titleLabel = Create("TextLabel", {
 		Text = text or "Dropdown",
-		Size = UDim2.new(0, labelWidth - 10, 1, 0),
-		Position = UDim2.new(0, 10, 0, 0),
-		TextWrapped = true,
+		Size = compact and UDim2.new(1, -16, 0, math.max(14, labelHeight)) or UDim2.new(0, labelWidth - 10, 1, 0),
+		Position = compact and UDim2.new(0, 8, 0, 2) or UDim2.new(0, 10, 0, 0),
+		TextWrapped = not compact,
+		TextTruncate = compact and Enum.TextTruncate.AtEnd or Enum.TextTruncate.None,
 		TextYAlignment = Enum.TextYAlignment.Center,
 		BackgroundTransparency = 1,
 		TextColor3 = t.Text,
@@ -1327,9 +1435,10 @@ function CoffeeIFY:CreateDropdown(tab, text, options, default, callback, theme)
 	local selectedLabel = Create("TextLabel", {
 		Name = "Selected",
 		Text = tostring(selected),
-		Size = UDim2.new(0, valueWidth - 6, 1, 0),
-		Position = UDim2.new(1, -valueWidth - 12, 0, 0),
-		TextWrapped = true,
+		Size = compact and UDim2.new(1, -32, 0, math.max(14, selectedHeight)) or UDim2.new(0, valueWidth - 6, 1, 0),
+		Position = compact and UDim2.new(0, 8, 0, rowHeight - math.max(14, selectedHeight) - 2) or UDim2.new(1, -valueWidth - 12, 0, 0),
+		TextWrapped = not compact,
+		TextTruncate = compact and Enum.TextTruncate.AtEnd or Enum.TextTruncate.None,
 		TextYAlignment = Enum.TextYAlignment.Center,
 		BackgroundTransparency = 1,
 		TextColor3 = t.SelectedText,
@@ -1341,8 +1450,8 @@ function CoffeeIFY:CreateDropdown(tab, text, options, default, callback, theme)
 
 	local arrow = Create("TextLabel", {
 		Text = "▾",
-		Size = UDim2.new(0, 16, 1, 0),
-		Position = UDim2.new(1, -18, 0, 0),
+		Size = compact and UDim2.new(0, 16, 0, math.max(14, selectedHeight)) or UDim2.new(0, 16, 1, 0),
+		Position = compact and UDim2.new(1, -18, 0, rowHeight - math.max(14, selectedHeight) - 2) or UDim2.new(1, -18, 0, 0),
 		BackgroundTransparency = 1,
 		TextColor3 = t.Arrow,
 		Font = Enum.Font.GothamBold,
@@ -1350,22 +1459,20 @@ function CoffeeIFY:CreateDropdown(tab, text, options, default, callback, theme)
 		Parent = mainBtn
 	})
 
-	local list = Create("Frame", {
+	local list = Create("ScrollingFrame", {
 		Name = "List",
 		Size = UDim2.new(1, 0, 0, 0),
-		Position = UDim2.new(0, 0, 0, rowHeight),
 		BackgroundColor3 = t.ListBg,
 		BorderSizePixel = 0,
 		ClipsDescendants = true,
 		Visible = false,
 		ZIndex = 20,
+		LayoutOrder = 2,
+		ScrollBarThickness = 3,
+		ScrollBarImageColor3 = Color3.fromRGB(120, 100, 75),
+		CanvasSize = UDim2.new(0, 0, 0, #options * 24),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 		Parent = frame
-	})
-
-	Create("UIStroke", {
-		Color = t.Stroke,
-		Thickness = 1,
-		Parent = list
 	})
 
 	Create("UIListLayout", {
@@ -1382,11 +1489,10 @@ function CoffeeIFY:CreateDropdown(tab, text, options, default, callback, theme)
 		open = false
 		arrow.Text = "▾"
 
-		Tween(list, {
-			Size = UDim2.new(1, 0, 0, 0)
-		}, 0.2)
+		-- collapse list height; AutomaticSize on frame shrinks and page reflows
+		list.Size = UDim2.new(1, 0, 0, 0)
 
-		task.delay(0.2, function()
+		task.defer(function()
 			if not open and list.Parent then
 				list.Visible = false
 			end
@@ -1401,11 +1507,11 @@ function CoffeeIFY:CreateDropdown(tab, text, options, default, callback, theme)
 		open = true
 		list.Visible = true
 
-		local height = #options * 24
+		local height = math.min(#options, 6) * 24
 
-		Tween(list, {
-			Size = UDim2.new(1, 0, 0, height)
-		}, 0.22, Enum.EasingStyle.Quad)
+		-- growing list height makes frame AutomaticSize expand,
+		-- which pushes every sibling under it in the page UIListLayout
+		list.Size = UDim2.new(1, 0, 0, height)
 
 		arrow.Text = "▴"
 		PlaySound(CLICK_SOUND, 0.3)
@@ -1451,9 +1557,7 @@ function CoffeeIFY:CreateDropdown(tab, text, options, default, callback, theme)
 
 			closeDropdown()
 
-			if callback then
-				task.spawn(callback, selected)
-			end
+			RunCallback(callback, selected)
 		end))
 	end
 
@@ -1526,17 +1630,433 @@ function CoffeeIFY:CreateDropdown(tab, text, options, default, callback, theme)
 	return frame
 end
 
+
+-- Fluent-style HSV Colorpicker (CoffeeIFY themed)
+function CoffeeIFY:CreateColorPicker(tab, text, default, callback, transparency)
+	local page = self:_GetPage(tab)
+	text = tostring(text or "Color")
+
+	local value = typeof(default) == "Color3" and default or Color3.fromRGB(120, 80, 50)
+	local hue, sat, vib = Color3.toHSV(value)
+	local useTrans = transparency ~= nil and transparency ~= false
+	local trans = tonumber(transparency)
+	if useTrans then
+		trans = math.clamp(trans or 0, 0, 1)
+	else
+		trans = 0
+	end
+
+	local open = false
+	local destroyed = false
+	local rowHeight = 28
+	local pageWidth = GetPageWidth(page, 260)
+	local innerWidth = math.max(60, pageWidth - 20)
+	local svWidth = math.clamp(innerWidth - 20, 40, 120)
+	local svHeight = math.clamp(math.floor(svWidth * 5 / 6), 40, 100)
+	local hueWidth = 12
+	local hueX = 10 + svWidth + 8
+	local rgbY = 10 + svHeight + 7
+	local transY = rgbY + 21
+	local bodyH = useTrans and (transY + 22) or (rgbY + 24)
+
+	local frame = Create("Frame", {
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundColor3 = Color3.fromRGB(218, 208, 188),
+		BorderSizePixel = 0,
+		ClipsDescendants = false,
+		Parent = page
+	})
+
+	Create("UIListLayout", {
+		FillDirection = Enum.FillDirection.Vertical,
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Padding = UDim.new(0, 0),
+		Parent = frame
+	})
+
+	local mainBtn = Create("TextButton", {
+		Size = UDim2.new(1, 0, 0, rowHeight),
+		BackgroundTransparency = 1,
+		Text = "",
+		AutoButtonColor = false,
+		ZIndex = 2,
+		LayoutOrder = 1,
+		Parent = frame
+	})
+
+	Create("TextLabel", {
+		Text = text,
+		Size = UDim2.new(1, -54, 1, 0),
+		Position = UDim2.new(0, 10, 0, 0),
+		BackgroundTransparency = 1,
+		TextColor3 = Color3.fromRGB(40, 35, 30),
+		Font = Enum.Font.Gotham,
+		TextSize = 12,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = mainBtn
+	})
+
+	-- checker display (Fluent style)
+	local display = Create("ImageLabel", {
+		Size = UDim2.fromOffset(26, 18),
+		Position = UDim2.new(1, -36, 0.5, -9),
+		BackgroundTransparency = 1,
+		Image = "rbxassetid://14204231522",
+		ImageTransparency = 0.45,
+		ScaleType = Enum.ScaleType.Tile,
+		TileSize = UDim2.fromOffset(40, 40),
+		ZIndex = 3,
+		Parent = mainBtn
+	})
+
+	local displayColor = Create("Frame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = value,
+		BackgroundTransparency = useTrans and trans or 0,
+		BorderSizePixel = 0,
+		ZIndex = 4,
+		Parent = display
+	})
+
+	local body = Create("Frame", {
+		Name = "Body",
+		Size = UDim2.new(1, 0, 0, 0),
+		BackgroundColor3 = Color3.fromRGB(210, 200, 180),
+		BorderSizePixel = 0,
+		ClipsDescendants = true,
+		Visible = false,
+		ZIndex = 5,
+		LayoutOrder = 2,
+		Parent = frame
+	})
+
+	-- SV square
+	local satVib = Create("ImageButton", {
+		Name = "SatVib",
+		Size = UDim2.fromOffset(svWidth, svHeight),
+		Position = UDim2.fromOffset(10, 10),
+		BackgroundColor3 = Color3.fromHSV(hue, 1, 1),
+		BorderSizePixel = 0,
+		Image = "",
+		AutoButtonColor = false,
+		ZIndex = 6,
+		Parent = body
+	})
+
+	-- white -> transparent gradient (S axis) approximated with frame overlays
+	local white = Create("Frame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+		ZIndex = 7,
+		Parent = satVib
+	})
+	Create("UIGradient", {
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0),
+			NumberSequenceKeypoint.new(1, 1),
+		}),
+		Parent = white
+	})
+
+	local black = Create("Frame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = Color3.new(0, 0, 0),
+		BorderSizePixel = 0,
+		ZIndex = 8,
+		Parent = satVib
+	})
+	Create("UIGradient", {
+		Rotation = 90,
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 1),
+			NumberSequenceKeypoint.new(1, 0),
+		}),
+		Parent = black
+	})
+
+	local cursor = Create("Frame", {
+		Name = "Cursor",
+		Size = UDim2.fromOffset(8, 8),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(sat, 1 - vib),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+		ZIndex = 9,
+		Parent = satVib
+	})
+	Create("UIStroke", {
+		Color = Color3.new(0, 0, 0),
+		Thickness = 1,
+		Parent = cursor
+	})
+
+	-- Hue bar
+	local hueBar = Create("ImageButton", {
+		Name = "Hue",
+		Size = UDim2.fromOffset(hueWidth, svHeight),
+		Position = UDim2.fromOffset(hueX, 10),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+		AutoButtonColor = false,
+		ZIndex = 6,
+		Parent = body
+	})
+	Create("UIGradient", {
+		Rotation = 90,
+		Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 0, 0)),
+			ColorSequenceKeypoint.new(0.17, Color3.fromRGB(255, 255, 0)),
+			ColorSequenceKeypoint.new(0.33, Color3.fromRGB(0, 255, 0)),
+			ColorSequenceKeypoint.new(0.5, Color3.fromRGB(0, 255, 255)),
+			ColorSequenceKeypoint.new(0.67, Color3.fromRGB(0, 0, 255)),
+			ColorSequenceKeypoint.new(0.83, Color3.fromRGB(255, 0, 255)),
+			ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 0, 0)),
+		}),
+		Parent = hueBar
+	})
+
+	local hueCursor = Create("Frame", {
+		Size = UDim2.new(1, 4, 0, 3),
+		Position = UDim2.new(0, -2, hue, -1),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+		ZIndex = 7,
+		Parent = hueBar
+	})
+	Create("UIStroke", {
+		Color = Color3.new(0, 0, 0),
+		Thickness = 1,
+		Parent = hueCursor
+	})
+
+	-- RGB readout
+	local rgbLabel = Create("TextLabel", {
+		BackgroundTransparency = 1,
+		Text = string.format("%d, %d, %d", math.floor(value.R * 255 + 0.5), math.floor(value.G * 255 + 0.5), math.floor(value.B * 255 + 0.5)),
+		Font = Enum.Font.GothamMedium,
+		TextSize = 11,
+		TextColor3 = Color3.fromRGB(60, 55, 50),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Size = UDim2.new(1, -20, 0, 16),
+		Position = UDim2.fromOffset(10, rgbY),
+		ZIndex = 6,
+		Parent = body
+	})
+
+	local transBar, transCursor
+	if useTrans then
+		transBar = Create("ImageButton", {
+			Name = "Transparency",
+			Size = UDim2.new(1, -20, 0, 12),
+			Position = UDim2.fromOffset(10, transY),
+			BackgroundColor3 = Color3.new(1, 1, 1),
+			BorderSizePixel = 0,
+			AutoButtonColor = false,
+			ZIndex = 6,
+			Parent = body
+		})
+		Create("UIGradient", {
+			Color = ColorSequence.new({
+				ColorSequenceKeypoint.new(0, value),
+				ColorSequenceKeypoint.new(1, value),
+			}),
+			Transparency = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 0),
+				NumberSequenceKeypoint.new(1, 1),
+			}),
+			Parent = transBar
+		})
+		transCursor = Create("Frame", {
+			Size = UDim2.fromOffset(3, 14),
+			Position = UDim2.new(trans, -1, 0.5, -7),
+			BackgroundColor3 = Color3.new(1, 1, 1),
+			BorderSizePixel = 0,
+			ZIndex = 7,
+			Parent = transBar
+		})
+		Create("UIStroke", {
+			Color = Color3.new(0, 0, 0),
+			Thickness = 1,
+			Parent = transCursor
+		})
+	end
+
+	local function applyColor(fire)
+		value = Color3.fromHSV(hue, sat, vib)
+		displayColor.BackgroundColor3 = value
+		displayColor.BackgroundTransparency = useTrans and trans or 0
+		satVib.BackgroundColor3 = Color3.fromHSV(hue, 1, 1)
+		cursor.Position = UDim2.fromScale(sat, 1 - vib)
+		hueCursor.Position = UDim2.new(0, -2, hue, -1)
+		rgbLabel.Text = string.format("%d, %d, %d", math.floor(value.R * 255 + 0.5), math.floor(value.G * 255 + 0.5), math.floor(value.B * 255 + 0.5))
+		if useTrans and transBar then
+			local g = transBar:FindFirstChildOfClass("UIGradient")
+			if g then
+				g.Color = ColorSequence.new({
+					ColorSequenceKeypoint.new(0, value),
+					ColorSequenceKeypoint.new(1, value),
+				})
+			end
+			transCursor.Position = UDim2.new(trans, -1, 0.5, -7)
+		end
+		if fire then
+			if useTrans then
+				RunCallback(callback, value, trans)
+			else
+				RunCallback(callback, value)
+			end
+		end
+	end
+
+	local draggingSV, draggingHue, draggingTrans = false, false, false
+
+	local function updateSV(input)
+		local abs = satVib.AbsolutePosition
+		local size = satVib.AbsoluteSize
+		if size.X <= 0 or size.Y <= 0 then return end
+		sat = math.clamp((input.Position.X - abs.X) / size.X, 0, 1)
+		vib = 1 - math.clamp((input.Position.Y - abs.Y) / size.Y, 0, 1)
+		applyColor(true)
+	end
+
+	local function updateHue(input)
+		local abs = hueBar.AbsolutePosition
+		local size = hueBar.AbsoluteSize
+		if size.Y <= 0 then return end
+		hue = math.clamp((input.Position.Y - abs.Y) / size.Y, 0, 1)
+		applyColor(true)
+	end
+
+	local function updateTrans(input)
+		if not transBar then return end
+		local abs = transBar.AbsolutePosition
+		local size = transBar.AbsoluteSize
+		if size.X <= 0 then return end
+		trans = math.clamp((input.Position.X - abs.X) / size.X, 0, 1)
+		applyColor(true)
+	end
+
+	self:_Track(satVib.InputBegan:Connect(function(input)
+		if self._closing then return end
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			draggingSV = true
+			updateSV(input)
+		end
+	end))
+	self:_Track(hueBar.InputBegan:Connect(function(input)
+		if self._closing then return end
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			draggingHue = true
+			updateHue(input)
+		end
+	end))
+	if transBar then
+		self:_Track(transBar.InputBegan:Connect(function(input)
+			if self._closing then return end
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				draggingTrans = true
+				updateTrans(input)
+			end
+		end))
+	end
+
+	self:_Track(UserInputService.InputChanged:Connect(function(input)
+		if self._closing or destroyed then return end
+		if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then
+			return
+		end
+		if draggingSV then updateSV(input) end
+		if draggingHue then updateHue(input) end
+		if draggingTrans then updateTrans(input) end
+	end))
+
+	self:_Track(UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			draggingSV, draggingHue, draggingTrans = false, false, false
+		end
+	end))
+
+	local function setOpen(v)
+		open = v
+		if open then
+			body.Visible = true
+			body.Size = UDim2.new(1, 0, 0, bodyH)
+			PlaySound(CLICK_SOUND, 0.3)
+		else
+			body.Size = UDim2.new(1, 0, 0, 0)
+			task.defer(function()
+				if not open and body.Parent then
+					body.Visible = false
+				end
+			end)
+		end
+	end
+
+	self:_Track(BindActivated(mainBtn, function()
+		if self._closing or destroyed then return end
+		setOpen(not open)
+	end))
+
+	self:_Track(mainBtn.MouseEnter:Connect(function()
+		if self._closing then return end
+		PlaySound(HOVER_SOUND, 0.18)
+		Tween(frame, { BackgroundColor3 = Color3.fromRGB(230, 220, 200) }, 0.12)
+	end))
+	self:_Track(mainBtn.MouseLeave:Connect(function()
+		if self._closing then return end
+		Tween(frame, { BackgroundColor3 = Color3.fromRGB(218, 208, 188) }, 0.12)
+	end))
+
+	self:_Track(frame.AncestryChanged:Connect(function(_, parent)
+		if not parent then
+			destroyed = true
+			open = false
+		end
+	end))
+
+	local api = {}
+	function api:SetValue(c, t)
+		if typeof(c) == "Color3" then
+			value = c
+			hue, sat, vib = Color3.toHSV(c)
+		end
+		if t ~= nil then
+			trans = math.clamp(tonumber(t) or 0, 0, 1)
+		end
+		applyColor(false)
+	end
+	function api:GetValue()
+		if useTrans then
+			return value, trans
+		end
+		return value
+	end
+
+	return frame, api
+end
+
 function CoffeeIFY:CreateKeybind(tab, text, default, callback)
 	local page = self:_GetPage(tab)
 
 	local key = default or Enum.KeyCode.E
+	if type(key) == "string" then
+		key = Enum.KeyCode[key] or Enum.UserInputType[key] or Enum.KeyCode.E
+	end
+	if typeof(key) ~= "EnumItem" or (key.EnumType ~= Enum.KeyCode and key.EnumType ~= Enum.UserInputType) then
+		key = Enum.KeyCode.E
+	end
 	local listening = false
 	text = tostring(text or "Keybind")
 	local pageWidth = GetPageWidth(page, 260)
+	local compact = pageWidth < 190
 	local naturalWidth = MeasureText(text, Enum.Font.Gotham, 12, 10000)
-	local labelWidth = math.clamp(math.ceil(naturalWidth + 18), 90, math.floor(pageWidth * 0.62))
-	local _, textHeight = MeasureText(text, Enum.Font.Gotham, 12, math.max(labelWidth - 18, 40))
-	local rowHeight = math.max(26, textHeight + 8)
+	local maxLabelWidth = math.max(40, math.floor(pageWidth * 0.62))
+	local minLabelWidth = math.min(90, maxLabelWidth)
+	local labelWidth = math.clamp(math.ceil(naturalWidth + 18), minLabelWidth, maxLabelWidth)
+	local _, textHeight = MeasureText(text, Enum.Font.Gotham, 12, compact and math.max(pageWidth - 16, 40) or math.max(labelWidth - 18, 40))
+	local rowHeight = compact and math.max(42, textHeight + 26) or math.max(26, textHeight + 8)
 
 	local frame = Create("Frame", {
 		Size = UDim2.new(1, 0, 0, rowHeight),
@@ -1545,11 +2065,12 @@ function CoffeeIFY:CreateKeybind(tab, text, default, callback)
 		Parent = page
 	})
 
-	Create("TextLabel", {
+	local keyTitle = Create("TextLabel", {
 		Text = text or "Keybind",
-		Size = UDim2.new(0, labelWidth - 18, 1, 0),
-		Position = UDim2.new(0, 10, 0, 0),
-		TextWrapped = true,
+		Size = compact and UDim2.new(1, -16, 0, math.max(16, textHeight)) or UDim2.new(0, labelWidth - 18, 1, 0),
+		Position = compact and UDim2.new(0, 8, 0, 0) or UDim2.new(0, 10, 0, 0),
+		TextWrapped = not compact,
+		TextTruncate = compact and Enum.TextTruncate.AtEnd or Enum.TextTruncate.None,
 		TextYAlignment = Enum.TextYAlignment.Center,
 		BackgroundTransparency = 1,
 		TextColor3 = Color3.fromRGB(40, 35, 30),
@@ -1562,8 +2083,8 @@ function CoffeeIFY:CreateKeybind(tab, text, default, callback)
 	local keyLabel = Create("TextLabel", {
 		Name = "Key",
 		Text = typeof(key) == "EnumItem" and key.Name or tostring(key),
-		Size = UDim2.new(0.35, -10, 0, 18),
-		Position = UDim2.new(0.65, 0, 0.5, -9),
+		Size = compact and UDim2.new(1, -16, 0, 18) or UDim2.new(0.35, -10, 0, 18),
+		Position = compact and UDim2.new(0, 8, 1, -20) or UDim2.new(0.65, 0, 0.5, -9),
 		BackgroundColor3 = Color3.fromRGB(50, 45, 40),
 		BorderSizePixel = 0,
 		TextColor3 = Color3.fromRGB(230, 220, 200),
@@ -1581,11 +2102,17 @@ function CoffeeIFY:CreateKeybind(tab, text, default, callback)
 	})
 
 	local function displayKey()
-		return typeof(key) == "EnumItem" and key.Name or tostring(key)
+		if typeof(key) == "EnumItem" then
+			return key.Name
+		end
+		return tostring(key)
 	end
 
 	local function cancelListen()
 		listening = false
+		if self._activeKeybindCancel == cancelListen then
+			self._activeKeybindCancel = nil
+		end
 		keyLabel.Text = displayKey()
 
 		Tween(keyLabel, {
@@ -1602,6 +2129,9 @@ function CoffeeIFY:CreateKeybind(tab, text, default, callback)
 		key = newKey
 		keyLabel.Text = displayKey()
 		listening = false
+		if self._activeKeybindCancel == cancelListen then
+			self._activeKeybindCancel = nil
+		end
 
 		Tween(keyLabel, {
 			BackgroundColor3 = Color3.fromRGB(50, 45, 40),
@@ -1619,6 +2149,12 @@ function CoffeeIFY:CreateKeybind(tab, text, default, callback)
 		if listening or self._closing then
 			return
 		end
+
+		-- Only one keybind may capture input at a time.
+		if self._activeKeybindCancel and self._activeKeybindCancel ~= cancelListen then
+			self._activeKeybindCancel()
+		end
+		self._activeKeybindCancel = cancelListen
 
 		PlaySound(HOVER_SOUND, 0.25)
 
@@ -1645,7 +2181,7 @@ function CoffeeIFY:CreateKeybind(tab, text, default, callback)
 		}, 0.15)
 
 		Tween(keyLabel, {
-			Size = UDim2.new(0.35, -8, 0, 19)
+			Size = compact and UDim2.new(1, -16, 0, 18) or UDim2.new(0.35, -8, 0, 19)
 		}, 0.12)
 	end))
 
@@ -1656,27 +2192,69 @@ function CoffeeIFY:CreateKeybind(tab, text, default, callback)
 			}, 0.15)
 
 			Tween(keyLabel, {
-				Size = UDim2.new(0.35, -10, 0, 18)
+				Size = compact and UDim2.new(1, -16, 0, 18) or UDim2.new(0.35, -10, 0, 18)
 			}, 0.12)
 		end
 	end))
 
 	self:_Track(BindActivated(btn, startListen))
 
+	local function matchesBind(input)
+		if typeof(key) == "EnumItem" and key.EnumType == Enum.KeyCode then
+			return input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == key
+		end
+		if typeof(key) == "EnumItem" and key.EnumType == Enum.UserInputType then
+			return input.UserInputType == key
+		end
+		return false
+	end
+
+	local function inputToBind(input)
+		-- keyboard / symbols (KeyCode covers letters, numbers, symbols)
+		if input.UserInputType == Enum.UserInputType.Keyboard then
+			if input.KeyCode == Enum.KeyCode.Escape then
+				return "cancel"
+			end
+			if input.KeyCode ~= Enum.KeyCode.Unknown then
+				return input.KeyCode
+			end
+		end
+		-- mouse
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.MouseButton2
+			or input.UserInputType == Enum.UserInputType.MouseButton3 then
+			return input.UserInputType
+		end
+		-- touch
+		if input.UserInputType == Enum.UserInputType.Touch then
+			return Enum.UserInputType.Touch
+		end
+		return nil
+	end
+
+	-- displayKey already defined above; keep mouse/touch matching helpers
+
+	self:_Track(frame.Destroying:Connect(function()
+		if self._activeKeybindCancel == cancelListen then
+			cancelListen()
+		end
+	end))
+
 	self:_Track(UserInputService.InputBegan:Connect(function(input, gameProcessed)
-		if self._closing then
+		if self._closing or not frame.Parent then
 			return
 		end
 
 		if listening then
-			if input.UserInputType == Enum.UserInputType.Keyboard then
-				if input.KeyCode == Enum.KeyCode.Escape then
-					cancelListen()
-				elseif input.KeyCode ~= Enum.KeyCode.Unknown then
-					setKey(input.KeyCode)
-				end
+			-- Ignore game-processed pointer input (especially the mouse press used
+			-- to click another keybind control), but still allow keyboard capture.
+			if gameProcessed and input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+			local bind = inputToBind(input)
+			if bind == "cancel" then
+				cancelListen()
+			elseif bind ~= nil then
+				setKey(bind)
 			end
-
 			return
 		end
 
@@ -1684,12 +2262,8 @@ function CoffeeIFY:CreateKeybind(tab, text, default, callback)
 			return
 		end
 
-		if input.UserInputType == Enum.UserInputType.Keyboard
-			and input.KeyCode == key then
-
-			if callback then
-				task.spawn(callback, key)
-			end
+		if matchesBind(input) then
+			RunCallback(callback, key)
 		end
 	end))
 
@@ -1961,9 +2535,7 @@ function CoffeeIFY:Notify(opts, durationOrOpts, extra)
 				if card.Parent then
 					card:Destroy()
 				end
-				if callback then
-					task.spawn(callback, isYes)
-				end
+				RunCallback(callback, isYes)
 			end)
 		end
 
@@ -1984,9 +2556,7 @@ function CoffeeIFY:Notify(opts, durationOrOpts, extra)
 			if card.Parent then
 				card:Destroy()
 			end
-			if callback then
-				task.spawn(callback)
-			end
+			RunCallback(callback)
 		end)
 	end
 
@@ -2071,7 +2641,321 @@ function CoffeeIFY:Notify(opts, durationOrOpts, extra)
 end
 
 
--- Export the API table expected by loadstring(... )().
-assert(type(CoffeeIFY) == "table" and type(CoffeeIFY.new) == "function",
-	"[CoffeeIFY] Library export is invalid; expected CoffeeIFY.new(config).")
+
+-- ============================================================
+-- Simple API: create / put / end / init
+-- Plus About tab, flags, hooks, and utility helpers
+-- ============================================================
+
+CoffeeIFY.Flags = CoffeeIFY.Flags or {}
+CoffeeIFY.Hooks = CoffeeIFY.Hooks or {}
+
+-- Safe exploit helpers (no-op when unavailable)
+local function safe(fn, ...)
+	local ok, res = pcall(fn, ...)
+	if ok then return res end
+	return nil
+end
+
+CoffeeIFY.Util = {
+	SetClipboard = function(text)
+		text = tostring(text or "")
+		if setclipboard then return safe(setclipboard, text) end
+		if toclipboard then return safe(toclipboard, text) end
+		if set_clipboard then return safe(set_clipboard, text) end
+		return false
+	end,
+	GetExecutor = function()
+		if identifyexecutor then return safe(identifyexecutor) end
+		if getexecutorname then return safe(getexecutorname) end
+		return "Unknown"
+	end,
+	IsSynapse = function()
+		return (syn and true) or false
+	end,
+	ProtectGui = function(gui)
+		if syn and syn.protect_gui then safe(syn.protect_gui, gui) end
+		if protect_gui then safe(protect_gui, gui) end
+		if gethui then
+			local h = safe(gethui)
+			if h and gui then gui.Parent = h end
+		end
+		return gui
+	end,
+	Request = function(opts)
+		opts = opts or {}
+		if request then return safe(request, opts) end
+		if http_request then return safe(http_request, opts) end
+		if syn and syn.request then return safe(syn.request, opts) end
+		return nil
+	end,
+	GetGenv = function()
+		if getgenv then return safe(getgenv) end
+		return _G
+	end,
+}
+
+function CoffeeIFY:_BuildAboutTab()
+	if self.tabs["About"] then
+		return self.tabs["About"]
+	end
+
+	local about = self:CreateTab("About")
+	local lp = player
+	local displayName = lp and (lp.DisplayName or lp.Name) or "Player"
+	local userName = lp and lp.Name or "Player"
+	local userId = lp and lp.UserId or 0
+
+	-- Profile card
+	local card = Create("Frame", {
+		Size = UDim2.new(1, 0, 0, 72),
+		BackgroundColor3 = Color3.fromRGB(218, 208, 188),
+		BorderSizePixel = 0,
+		Parent = about.Page
+	})
+
+	local avatar = Create("ImageLabel", {
+		Size = UDim2.fromOffset(48, 48),
+		Position = UDim2.fromOffset(10, 12),
+		BackgroundColor3 = Color3.fromRGB(190, 180, 160),
+		BorderSizePixel = 0,
+		Parent = card
+	})
+
+	task.spawn(function()
+		local ok, url = pcall(function()
+			return Players:GetUserThumbnailAsync(
+				userId,
+				Enum.ThumbnailType.HeadShot,
+				Enum.ThumbnailSize.Size100x100
+			)
+		end)
+		if ok and avatar and avatar.Parent then
+			avatar.Image = url
+		end
+	end)
+
+	Create("TextLabel", {
+		Text = "Welcome, " .. displayName,
+		Size = UDim2.new(1, -72, 0, 20),
+		Position = UDim2.fromOffset(68, 14),
+		BackgroundTransparency = 1,
+		TextColor3 = Color3.fromRGB(35, 30, 25),
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = card
+	})
+
+	Create("TextLabel", {
+		Text = "@" .. userName,
+		Size = UDim2.new(1, -72, 0, 16),
+		Position = UDim2.fromOffset(68, 36),
+		BackgroundTransparency = 1,
+		TextColor3 = Color3.fromRGB(90, 80, 70),
+		Font = Enum.Font.Gotham,
+		TextSize = 11,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = card
+	})
+
+	self:CreateLabel(about, "Enjoy CoffeeIFY? Tell it to jamalskibrodad@gmail.com.")
+
+	self:CreateLabel(about, "Executor: " .. tostring(CoffeeIFY.Util.GetExecutor()))
+
+	self:CreateButton(about, "Copy Contact Email", function()
+		CoffeeIFY.Util.SetClipboard("jamalskibrodad@gmail.com")
+		self:Notify({
+			Title = "Copied",
+			Description = "Email copied to clipboard.",
+			Type = "success",
+			Duration = 2,
+		})
+	end)
+
+	self:CreateToggle(about, "UI Sounds", true, function(v)
+		CoffeeIFY.Flags.Sounds = v
+	end)
+	CoffeeIFY.Flags.Sounds = true
+
+	self:CreateToggle(about, "Streamproof", false, function(v)
+		CoffeeIFY.Flags.Streamproof = v
+		if self.gui then
+			pcall(function()
+				self.gui.IgnoreGuiInset = true
+				if v and syn and syn.protect_gui then
+					syn.protect_gui(self.gui)
+				end
+			end)
+		end
+	end)
+
+	self:CreateButton(about, "Print Environment", function()
+		local info = table.concat({
+			"Executor: " .. tostring(CoffeeIFY.Util.GetExecutor()),
+			"User: " .. userName,
+			"PlaceId: " .. tostring(game.PlaceId),
+		}, " | ")
+		print("[CoffeeIFY]", info)
+		self:Notify({ Title = "Environment", Description = info, Type = "info", Duration = 4 })
+	end)
+
+	return about
+end
+
+-- Simple builder state
+local Simple = {
+	Config = nil,
+	Queue = {},
+	CurrentTab = nil,
+	Instance = nil,
+}
+
+local function norm(s)
+	return string.lower(tostring(s or ""))
+end
+
+--[[
+	Simple API usage:
+
+	local UI = loadstring(game:HttpGet("..."))()
+
+	UI.create("window", { Title = "My Hub" })
+	UI.create("tab", "Main")
+	UI.put("button", "Hello", function() print("hi") end)
+	UI.put("toggle", "ESP", false, function(v) print(v) end)
+	UI.put("slider", "Speed", 1, 100, 16, function(v) end)
+	UI.put("dropdown", "Mode", {"A","B","C"}, "A", function(v) end)
+	UI.put("textbox", "Name...", function(text) end)
+	UI.put("label", "Section text")
+	UI.put("keybind", "Open", Enum.KeyCode.RightShift, function() end)
+	UI.put("color", "Accent", Color3.fromRGB(120,80,50), function(c) end)
+	UI["end"]()
+	UI.create("tab", "More")
+	UI.put("button", "Run", function() end)
+	UI["end"]()
+	UI.init()
+]]
+
+function CoffeeIFY.create(kind, a, b)
+	kind = norm(kind)
+	if kind == "window" or kind == "win" then
+		if type(a) == "table" then
+			Simple.Config = a
+		else
+			Simple.Config = { Title = tostring(a or "CoffeeIFY") }
+		end
+		return
+	end
+	if kind == "tab" then
+		local name = tostring(a or "Tab")
+		Simple.CurrentTab = name
+		table.insert(Simple.Queue, { Kind = "tab", Name = name })
+		return
+	end
+	warn("[CoffeeIFY] create: unknown kind '" .. tostring(kind) .. "'")
+end
+
+function CoffeeIFY.put(kind, ...)
+	kind = norm(kind)
+	local args = { ... }
+	if not Simple.CurrentTab then
+		warn("[CoffeeIFY] put: create a tab first")
+		return
+	end
+	table.insert(Simple.Queue, {
+		Kind = kind,
+		Tab = Simple.CurrentTab,
+		Args = args,
+	})
+end
+
+CoffeeIFY["end"] = function()
+	Simple.CurrentTab = nil
+end
+
+-- alias for scripts that cannot use CoffeeIFY["end"]
+CoffeeIFY.finish = CoffeeIFY["end"]
+CoffeeIFY.close_tab = CoffeeIFY["end"]
+
+function CoffeeIFY.init()
+	local ui = CoffeeIFY.new(Simple.Config or {})
+	Simple.Instance = ui
+
+	local tabMap = {}
+	local pendingNotifications = {}
+	local queue = table.clone(Simple.Queue)
+
+	for _, item in ipairs(queue) do
+		if item.Kind == "tab" then
+			tabMap[item.Name] = ui:CreateTab(item.Name)
+		else
+			local tab = tabMap[item.Tab]
+			if not tab then
+				tab = ui:CreateTab(item.Tab)
+				tabMap[item.Tab] = tab
+			end
+			local a = item.Args
+			local k = item.Kind
+
+			if k == "button" or k == "btn" then
+				ui:CreateButton(tab, a[1], a[2])
+			elseif k == "toggle" or k == "switch" then
+				ui:CreateToggle(tab, a[1], a[2], a[3])
+			elseif k == "slider" then
+				ui:CreateSlider(tab, a[1], a[2], a[3], a[4], a[5])
+			elseif k == "dropdown" or k == "drop" then
+				ui:CreateDropdown(tab, a[1], a[2], a[3], a[4], a[5])
+			elseif k == "textbox" or k == "input" then
+				ui:CreateTextBox(tab, a[1], a[2])
+			elseif k == "label" or k == "text" then
+				ui:CreateLabel(tab, a[1])
+			elseif k == "keybind" or k == "key" then
+				ui:CreateKeybind(tab, a[1], a[2], a[3])
+			elseif k == "color" or k == "colorpicker" or k == "colour" then
+				ui:CreateColorPicker(tab, a[1], a[2], a[3], a[4])
+			elseif k == "notify" then
+				table.insert(pendingNotifications, a)
+			else
+				warn("[CoffeeIFY] put: unknown kind '" .. k .. "'")
+			end
+		end
+	end
+
+	ui:_BuildAboutTab()
+
+	Simple.Queue = {}
+	Simple.CurrentTab = nil
+
+	for _, args in ipairs(pendingNotifications) do
+		ui:Notify(table.unpack(args))
+	end
+
+	if CoffeeIFY.Hooks.OnInit then
+		RunCallback(CoffeeIFY.Hooks.OnInit, ui)
+	end
+
+	return ui
+end
+
+-- Hook helpers
+function CoffeeIFY.OnInit(fn)
+	CoffeeIFY.Hooks.OnInit = fn
+end
+
+function CoffeeIFY.OnFlag(name, fn)
+	CoffeeIFY.Hooks["Flag_" .. tostring(name)] = fn
+end
+
+function CoffeeIFY.SetFlag(name, value)
+	CoffeeIFY.Flags[name] = value
+	local h = CoffeeIFY.Hooks["Flag_" .. tostring(name)]
+	if h then RunCallback(h, value) end
+end
+
+function CoffeeIFY.GetFlag(name)
+	return CoffeeIFY.Flags[name]
+end
+
+
 return CoffeeIFY
