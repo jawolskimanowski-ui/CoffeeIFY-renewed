@@ -13,6 +13,22 @@ local EnableSave = true
 local Flags = {}
 local ThemeSettings = {}
 
+-- Built-in defaults keep the library functional even when the optional Nier
+-- sound pack cannot be fetched or compiled.
+Library.SoundEnabled = true
+Library.SoundVolume = 1
+function Library:SetSoundEnabled(state)
+    self.SoundEnabled = state == true
+end
+function Library:SetSoundVolume(value)
+    local volume = tonumber(value)
+    if not volume or volume ~= volume then
+        return false
+    end
+    self.SoundVolume = math.clamp(volume, 0, 1)
+    return true
+end
+
 local WHITE = Color3.new(1, 1, 1)
 
 local function getExecutorFunction(name)
@@ -28,6 +44,17 @@ local function getExecutorFunction(name)
     end)
     if ok and type(value) == "function" then
         return value
+    end
+
+    local getgenvFunction
+    ok, getgenvFunction = pcall(function()
+        return (_G and _G.getgenv) or (getfenv and getfenv(0) and getfenv(0).getgenv)
+    end)
+    if ok and type(getgenvFunction) == "function" then
+        local envOk, env = pcall(getgenvFunction)
+        if envOk and type(env) == "table" and type(env[name]) == "function" then
+            return env[name]
+        end
     end
     return nil
 end
@@ -1278,13 +1305,15 @@ local function playWindowStyle(shouldOpen, style)
     end
 end
 
+local sfxInitialized = false
 local function SetWindowOpen(shouldOpen)
     if animating or shouldOpen == main.Visible then
         return
     end
 
-    if Library._reloadAllSfx then
-        Library._reloadAllSfx()
+    if Library._reloadAllSfx and not sfxInitialized then
+        sfxInitialized = true
+        task.defer(Library._reloadAllSfx)
     end
     if Library._sfx then
         Library._sfx(shouldOpen and "open" or "close")
@@ -2195,7 +2224,9 @@ local function nextOrder()
 end
 
 local function SelectTab()
-    if KeySystemEnabled and not KeyAuthenticated then
+    -- AUTH tab is always allowed while locked; everything else is blocked
+    local isAuthTab = (CategoryName == "AUTH")
+    if KeySystemEnabled and not KeyAuthenticated and not isAuthTab then
         KeyFailClicks = KeyFailClicks + 1
         Notify("Complete authentication first.", 3.5)
         if KeyFailClicks >= 3 then
@@ -2472,7 +2503,7 @@ function CategoryElements:CreateTextbox(TextboxText, IconName, Placeholder, Flag
     bind(lbl, "TextColor3", "Ink")
     if hasIcon then bind(marker, "ImageColor3", "Accent") else bind(marker, "BackgroundColor3", "Accent") end
 
-    local tb = inputBox(row, Placeholder, restored or "")
+    local tb = inputBox(row, Placeholder, restored ~= nil and tostring(restored) or "")
     if Flag then
         Flags[Flag] = { Type = "Textbox", Value = tb.Text }
     end
@@ -2485,6 +2516,19 @@ function CategoryElements:CreateTextbox(TextboxText, IconName, Placeholder, Flag
             Callback(tb.Text)
         end
     end)
+
+    return {
+        Get = function()
+            return tb.Text
+        end,
+        Set = function(v)
+            tb.Text = tostring(v or "")
+            if Flag then
+                Flags[Flag].Value = tb.Text
+            end
+        end,
+        TextBox = tb,
+    }
 end
 
 function CategoryElements:CreateNumberTextbox(LabelText, IconName, DefaultNumber, Flag, Callback)
@@ -2515,6 +2559,24 @@ function CategoryElements:CreateNumberTextbox(LabelText, IconName, DefaultNumber
             Callback(n)
         end
     end)
+
+    return {
+        Get = function()
+            return tonumber(tb.Text)
+        end,
+        GetText = function()
+            return tb.Text
+        end,
+        Set = function(v)
+            local n = tonumber(v)
+            if not n or n ~= n then return false end
+            tb.Text = tostring(n)
+            if Flag then Flags[Flag].Value = n end
+            if Callback then Callback(n) end
+            return true
+        end,
+        TextBox = tb,
+    }
 end
 
 function CategoryElements:CreateSearchBar(Placeholder, IconName, Callback)
@@ -2549,6 +2611,11 @@ tb:GetPropertyChangedSignal("Text"):Connect(function()
         Callback(tb.Text)
     end
 end)
+return {
+    Get = function() return tb.Text end,
+    Set = function(value) tb.Text = tostring(value or "") end,
+    TextBox = tb,
+}
 end
 
 function CategoryElements:CreateToggle(ToggleText, IconName, DefaultState, Flag, Callback)
@@ -2622,10 +2689,18 @@ function CategoryElements:CreateSlider(SliderText, IconName, Min, Max, Default, 
     if type(Flag) == "function" then
         Callback = Flag; Flag = nil
     end
+
+    Min = tonumber(Min) or 0
+    Max = tonumber(Max) or 100
+    if Min ~= Min then Min = 0 end
+    if Max ~= Max then Max = 100 end
+    if Min > Max then Min, Max = Max, Min end
     if Flag and SavedFlags[Flag] ~= nil then
         Default = SavedFlags[Flag]
     end
-    local value = math.clamp(Default or Min, Min, Max)
+    local defaultNumber = tonumber(Default)
+    if not defaultNumber or defaultNumber ~= defaultNumber then defaultNumber = Min end
+    local value = math.clamp(defaultNumber, Min, Max)
     if Flag then
         Flags[Flag] = { Type = "Slider", Value = value }
     end
@@ -2739,9 +2814,15 @@ end)
 
 return {
     Set = function(v)
-        value = math.clamp(v, Min, Max)
+        local numeric = tonumber(v)
+        if not numeric or numeric ~= numeric then return false end
+        local nextValue = math.clamp(numeric, Min, Max)
+        local changed = nextValue ~= value
+        value = nextValue
         if Flag then Flags[Flag].Value = value end
         render()
+        if changed and Callback then Callback(value) end
+        return true
     end,
     Get = function() return value end,
 }
@@ -2850,6 +2931,9 @@ end
 refreshHex()
 local function commit()
     current = Color3.fromHSV(Hue, Sat, Val)
+    svBox.BackgroundColor3 = Color3.fromHSV(Hue, 1, 1)
+    svCursor.Position = UDim2.new(Sat, 0, 1 - Val, 0)
+    hueCursor.Position = UDim2.new(Hue, 0, 0.5, 0)
     swatch.BackgroundColor3 = current
     refreshHex()
     if Flag then
@@ -2886,15 +2970,30 @@ header.MouseButton1Click:Connect(function()
         Size = UDim2.new(1, 0, 0, expanded and 154 or 28),
     }):Play()
 end)
+
+return {
+    Get = function() return current end,
+    Set = function(color)
+        if typeof(color) ~= "Color3" then return false end
+        Hue, Sat, Val = color:ToHSV()
+        commit()
+        return true
+    end,
+    GetHex = function() return toHex(current) end,
+    Container = container,
+}
 end
 
 local function buildDropdown(multi, text, icon, options, default, flag, callback)
+    options = type(options) == "table" and options or {}
     local selSet, selOrder, currentVal = {}, {}, nil
     if multi then
-        for _, v in ipairs(default or {}) do
-            if not selSet[v] then
-                selSet[v] = true
-                table.insert(selOrder, v)
+        if type(default) == "table" then
+            for _, v in ipairs(default) do
+                if v ~= nil and not selSet[v] then
+                    selSet[v] = true
+                    table.insert(selOrder, v)
+                end
             end
         end
     else
@@ -3059,13 +3158,33 @@ end)
 end
 
 local function rebuild(newOptions)
+    newOptions = type(newOptions) == "table" and newOptions or {}
     for _, e in ipairs(entries) do
         e.btn:Destroy()
     end
     table.clear(entries)
-    for _, opt in ipairs(newOptions or {}) do
-        addOption(opt)
+    for _, opt in ipairs(newOptions) do
+        if opt ~= nil then addOption(opt) end
     end
+
+    if multi then
+        local available = {}
+        for _, e in ipairs(entries) do available[e.value] = true end
+        for i = #selOrder, 1, -1 do
+            local selected = selOrder[i]
+            if not available[selected] then
+                selSet[selected] = nil
+                table.remove(selOrder, i)
+            end
+        end
+    elseif currentVal ~= nil then
+        local found = false
+        for _, e in ipairs(entries) do
+            if e.value == currentVal then found = true break end
+        end
+        if not found then currentVal = nil end
+    end
+
     paintMarks()
     updateSize()
 end
@@ -3121,10 +3240,11 @@ rebuild(options)
 
 local api = {}
 function api:Refresh(newOptions)
-    rebuild(newOptions or options)
+    options = type(newOptions) == "table" and newOptions or options
+    rebuild(options)
 end
 function api:SetOptions(newOptions)
-    options = newOptions or {}
+    options = type(newOptions) == "table" and newOptions or {}
     if multi then
         selSet = {}
         table.clear(selOrder)
@@ -3137,17 +3257,26 @@ if multi then
         return selOrder
     end
     function api:SetSelected(list)
+        if type(list) ~= "table" then list = {} end
+        table.clear(selSet)
+        table.clear(selOrder)
+        local available = {}
         for _, e in ipairs(entries) do
-            local want = false
-            for _, v in ipairs(list or {}) do
-                if v == e.value then want = true break end
+            available[e.value] = true
+        end
+        for _, value in ipairs(list) do
+            if value ~= nil and available[value] and not selSet[value] then
+                selSet[value] = true
+                table.insert(selOrder, value)
             end
-            setChecked(e, want, true)
         end
         paintMarks()
         fire()
     end
 else
+    function api:GetValue()
+        return currentVal
+    end
     function api:SetValue(v)
         currentVal = v
         paintMarks()
@@ -3436,7 +3565,7 @@ task.defer(function()
     local pl = new("TextLabel", {
         BackgroundTransparency = 1,
         Size = UDim2.new(1, 0, 1, 0),
-        Text = "Recreated by jawolskimanowski and visuals by nicer, like this ui? Send a feedback at my email — jawolskimanowski@gmail.com.",
+        Text = "UI library by jawolskimanowski\nVisual design: nicer\nFeedback: jawolskimanowski@gmail.com",
         TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top,
         TextWrapped = true,
@@ -3448,33 +3577,65 @@ end)
 -- Internal AUTH tab when key system is requested
 if KeySystemEnabled then
     task.defer(function()
-        local AuthTab, AuthPage = WindowElements:CreateCategory("AUTH", "lucide-key", false)
+        local AuthTab, AuthPage, AuthBtn = WindowElements:CreateCategory("AUTH", "lucide-key", false)
         AuthTab:CreateLabel("KEY SYSTEM", "lucide-shield")
         AuthTab:CreateLabel(KeyNote)
-        local inputBox
-        inputBox = AuthTab:CreateTextbox("Access Key", "lucide-key", "Enter key...", nil, function(text)
-            -- live not required
-        end)
-        -- CreateTextBox may not exist with that signature; fallback button verify
-        AuthTab:CreateButton("VERIFY KEY", "lucide-check", function()
+        AuthTab:CreateLabel("Type the key below, then press VERIFY KEY.")
+
+        local keyBox = AuthTab:CreateTextbox("Access Key", nil, "Enter key...", "AuthKeyInput", nil)
+        local lastTyped = ""
+
+        AuthTab:CreateButton("VERIFY KEY", function()
             local typed = ""
-            if inputBox and inputBox.Get then
-                typed = tostring(inputBox.Get() or "")
+            if keyBox and keyBox.Get then
+                typed = tostring(keyBox.Get() or "")
             end
-            -- try to read any TextBox under the page
-            for _, d in ipairs(AuthPage:GetDescendants()) do
-                if d:IsA("TextBox") then
-                    typed = d.Text
-                    break
+            if typed == "" then
+                for _, d in ipairs(AuthPage:GetDescendants()) do
+                    if d:IsA("TextBox") then
+                        typed = d.Text or ""
+                        break
+                    end
                 end
             end
-            if string.upper(tostring(typed)) == string.upper(ExpectedKey) then
+            if Flags.AuthKeyInput and Flags.AuthKeyInput.Value then
+                if typed == "" then typed = tostring(Flags.AuthKeyInput.Value) end
+            end
+            typed = tostring(typed or ""):gsub("^%s+", ""):gsub("%s+$", "")
+            lastTyped = typed
+
+            if typed ~= "" and string.upper(typed) == string.upper(ExpectedKey) then
                 KeyAuthenticated = true
                 KeyFailClicks = 0
                 Notify({ Title = "AUTHENTICATED", Description = "Welcome. Categories unlocked.", Duration = 3.5 })
+                -- open first non-AUTH category if any
+                for _, b in ipairs(Sidebar:GetChildren()) do
+                    if b:IsA("TextButton") and b.Name ~= "AUTH" and b.Visible then
+                        -- fire select by simulating attribute + visibility via click if possible
+                        pcall(function()
+                            for _, page in ipairs(ContentContainer:GetChildren()) do
+                                if page:IsA("ScrollingFrame") then
+                                    page.Visible = false
+                                end
+                            end
+                            for _, bb in ipairs(Sidebar:GetChildren()) do
+                                if bb:IsA("TextButton") then
+                                    bb:SetAttribute("CategorySelected", false)
+                                end
+                            end
+                            b:SetAttribute("CategorySelected", true)
+                            local targetPage = ContentContainer:FindFirstChild(b.Name .. "Page")
+                            if targetPage then
+                                targetPage.Visible = true
+                                if AnimatePageIn then AnimatePageIn(targetPage) end
+                            end
+                        end)
+                        break
+                    end
+                end
             else
                 KeyFailClicks = KeyFailClicks + 1
-                Notify({ Title = "INVALID KEY", Description = "Complete authentication first.", Duration = 3 })
+                Notify({ Title = "INVALID KEY", Description = "Complete authentication first. (" .. tostring(KeyFailClicks) .. "/3)", Duration = 3 })
                 if KeyFailClicks >= 3 then
                     local char = LocalPlayer and LocalPlayer.Character
                     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -3483,16 +3644,21 @@ if KeySystemEnabled then
                 end
             end
         end)
-        -- Select AUTH first when locked
+
+        -- Force AUTH visible first when locked
+        task.wait()
         for _, b in ipairs(Sidebar:GetChildren()) do
-            if b:IsA("TextButton") and b.Name == "AUTH" then
-                b:SetAttribute("CategorySelected", true)
+            if b:IsA("TextButton") then
+                b:SetAttribute("CategorySelected", b.Name == "AUTH")
             end
         end
         for _, page in ipairs(ContentContainer:GetChildren()) do
             if page:IsA("ScrollingFrame") then
                 page.Visible = (page.Name == "AUTHPage")
             end
+        end
+        if AuthBtn then
+            AuthBtn:SetAttribute("CategorySelected", true)
         end
     end)
 end
@@ -3613,6 +3779,154 @@ do
                 end
             end
         end
+    end
+end
+
+-- Extra custom MP3s. These supplement the original Nier effects:
+-- * robotic warning voice: notification events only
+-- * button click: hover/select/toggle events only
+-- Slider, open, and close sounds remain exclusively Nier sounds.
+do
+    local SoundService = game:GetService("SoundService")
+    local Debris = game:GetService("Debris")
+    local NOTIFY_MP3_URL = "https://github.com/jawolskimanowski-ui/CoffeeIFY-renewed/raw/refs/heads/main/Robotic-female-sound-effect-warning.mp3"
+    local CLICK_MP3_URL = "https://github.com/jawolskimanowski-ui/CoffeeIFY-renewed/raw/refs/heads/main/Button%20Click%202%20-%20Kaino.mp3"
+    local ASSET_FOLDER = "UILibrary"
+    local NOTIFY_PATH = ASSET_FOLDER .. "/NotifySound.mp3"
+    local CLICK_PATH = ASSET_FOLDER .. "/ClickSound.mp3"
+    local NOTIFY_FALLBACK_PATH = "UILibrary_NotifySound.mp3"
+    local CLICK_FALLBACK_PATH = "UILibrary_ClickSound.mp3"
+    local notifyId, clickId = nil, nil
+    local notifyPath, clickPath = NOTIFY_PATH, CLICK_PATH
+    local downloadStarted = false
+    local retryPending = {}
+
+    local function getAssetFunction()
+        return getExecutorFunction("getcustomasset") or getExecutorFunction("getsynasset")
+    end
+
+    local function resolve(path)
+        local asset = getAssetFunction()
+        if not asset then return nil end
+        local ok, id = pcall(asset, path)
+        if ok and type(id) == "string" and id ~= "" then
+            return id
+        end
+        return nil
+    end
+
+    local function download(path, fallbackPath, url)
+        local write = getExecutorFunction("writefile")
+        if not write then return nil end
+
+        local makeFolder = getExecutorFunction("makefolder")
+        local isFolder = getExecutorFunction("isfolder")
+        local folderReady = false
+        if makeFolder then
+            if isFolder then
+                local ok, exists = pcall(isFolder, ASSET_FOLDER)
+                folderReady = ok and exists == true
+            end
+            if not folderReady then
+                local ok = pcall(makeFolder, ASSET_FOLDER)
+                folderReady = ok
+            end
+        end
+        if not folderReady then
+            path = fallbackPath
+        end
+
+        local isFile = getExecutorFunction("isfile")
+        if isFile then
+            local ok, exists = pcall(isFile, path)
+            if ok and exists then return path end
+        end
+
+        local ok, data = pcall(function()
+            return game:HttpGet(url)
+        end)
+        if not ok or type(data) ~= "string" or data == "" then
+            return nil
+        end
+        local wrote = pcall(write, path, data)
+        if wrote then return path end
+
+        if path ~= fallbackPath then
+            wrote = pcall(write, fallbackPath, data)
+            if wrote then return fallbackPath end
+        end
+        return nil
+    end
+
+    local function refreshIds()
+        notifyId = resolve(notifyPath) or notifyId
+        clickId = resolve(clickPath) or clickId
+    end
+
+    local function ensureDownloads()
+        if downloadStarted then return end
+        downloadStarted = true
+        task.spawn(function()
+            notifyPath = download(NOTIFY_PATH, NOTIFY_FALLBACK_PATH, NOTIFY_MP3_URL) or notifyPath
+            clickPath = download(CLICK_PATH, CLICK_FALLBACK_PATH, CLICK_MP3_URL) or clickPath
+            refreshIds()
+        end)
+    end
+
+    local function playId(id, volume)
+        if Library.SoundEnabled == false or not id then return end
+        local sound = Instance.new("Sound")
+        sound.Name = "UILibrary_CustomSfx"
+        sound.SoundId = id
+        sound.Volume = math.clamp((tonumber(Library.SoundVolume) or 1) * (volume or 1), 0, 1)
+        sound.Parent = SoundService
+        sound.Ended:Connect(function()
+            if sound.Parent then sound:Destroy() end
+        end)
+        Debris:AddItem(sound, 10)
+        local ok = pcall(function() sound:Play() end)
+        if not ok and sound.Parent then sound:Destroy() end
+    end
+
+    local function playWhenReady(kind, volume)
+        refreshIds()
+        local id = kind == "notify" and notifyId or clickId
+        if id then
+            playId(id, volume)
+            return
+        end
+        if retryPending[kind] then return end
+        retryPending[kind] = true
+        task.spawn(function()
+            for _ = 1, 24 do
+                if Library.SoundEnabled == false then break end
+                task.wait(0.125)
+                refreshIds()
+                id = kind == "notify" and notifyId or clickId
+                if id then
+                    playId(id, volume)
+                    break
+                end
+            end
+            retryPending[kind] = nil
+        end)
+    end
+
+    ensureDownloads()
+    local baseSfx = Library._sfx
+    Library._sfx = function(name, ...)
+        name = tostring(name or "")
+        if type(baseSfx) == "function" then
+            pcall(baseSfx, name, ...)
+        end
+
+        if Library.SoundEnabled == false then return end
+        if name == "notify" then
+            playWhenReady("notify", 0.9)
+        elseif name == "hover" or name == "select" or name == "toggleOn" or name == "toggleOff" then
+            playWhenReady("click", 0.55)
+        end
+        -- No custom click sound is assigned to slider/open/close/alert.
     end
 end
 
