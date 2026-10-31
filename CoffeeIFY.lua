@@ -347,8 +347,8 @@ function Library:CreateWindow(WindowName, Config)
     cfgColor("TextColor", "Ink")
     cfgColor("TeamColor", "Team")
 
-    local GTrans = math.clamp(Config.ElementTransparency or 0.08, 0, 0.9)
-    local FontScale = Config.FontScale or 1
+    local GTrans = math.clamp(tonumber(Config.ElementTransparency) or 0.08, 0, 0.9)
+    local FontScale = math.clamp(tonumber(Config.FontScale) or 1, 0.75, 1.35)
     local OverallScalePercent = math.clamp(tonumber(Config.OverallScale) or 100, 70, 130)
     local ToggleButtonScalePercent = math.clamp(tonumber(Config.ToggleButtonScale) or 100, 50, 180)
     local mainUIScale, stripUIScale, toggleUIScale
@@ -387,7 +387,7 @@ function Library:CreateWindow(WindowName, Config)
     local CurrentPreset = (type(Config.Theme) == "string" and Presets[Config.Theme]) and Config.Theme or "Paper"
     local BorderEnabled = Config.BorderEnabled ~= false
     local BgImage = Config.BackgroundImage or ""
-    local BgImageTransparency = Config.BackgroundImageTransparency or 0.5
+    local BgImageTransparency = math.clamp(tonumber(Config.BackgroundImageTransparency) or 0.5, 0, 1)
     local BgImageEnabled = BgImage ~= ""
     if Config.BackgroundImageEnabled ~= nil then
         BgImageEnabled = Config.BackgroundImageEnabled
@@ -430,7 +430,9 @@ function Library:CreateWindow(WindowName, Config)
             end
         end
         if savedTheme.Transparency ~= nil then GTrans = savedTheme.Transparency end
-        if savedTheme.FontScale ~= nil then FontScale = savedTheme.FontScale end
+        if savedTheme.FontScale ~= nil then
+            FontScale = math.clamp(tonumber(savedTheme.FontScale) or 1, 0.75, 1.35)
+        end
         if savedTheme.OverallScalePercent ~= nil then
             OverallScalePercent = math.clamp(tonumber(savedTheme.OverallScalePercent) or 100, 70, 130)
         end
@@ -441,7 +443,9 @@ function Library:CreateWindow(WindowName, Config)
         if savedTheme.Language == "th" or savedTheme.Language == "en" then Language = savedTheme.Language end
         if savedTheme.BorderEnabled ~= nil then BorderEnabled = savedTheme.BorderEnabled end
         if savedTheme.BackgroundImage ~= nil then BgImage = savedTheme.BackgroundImage end
-        if savedTheme.BackgroundImageTransparency ~= nil then BgImageTransparency = savedTheme.BackgroundImageTransparency end
+        if savedTheme.BackgroundImageTransparency ~= nil then
+            BgImageTransparency = math.clamp(tonumber(savedTheme.BackgroundImageTransparency) or 0.5, 0, 1)
+        end
         if savedTheme.BackgroundImageEnabled ~= nil then BgImageEnabled = savedTheme.BackgroundImageEnabled end
         if savedTheme.SoundVolume ~= nil then
             Library.SoundVolume = math.clamp(tonumber(savedTheme.SoundVolume) or 1, 0, 1)
@@ -449,7 +453,7 @@ function Library:CreateWindow(WindowName, Config)
     end
     local SavedFlags = savedFlags or {}
 
-    local themed, lookers, glass = {}, {}, {}
+    local themed, lookers, glass, fontObjects = {}, {}, {}, {}
 
     local function resolve(spec)
         if type(spec) == "function" then
@@ -488,12 +492,41 @@ function Library:CreateWindow(WindowName, Config)
     end
     local function bindFont(inst, size, bold)
         applyFont(inst, size, bold)
+        table.insert(fontObjects, { instance = inst, size = size, bold = bold })
     end
 
     local function bindGlass(inst)
         inst.BackgroundTransparency = GTrans
         table.insert(glass, inst)
     end
+
+local function makeRaiseController(root, raisedScale)
+    local originalZ = {}
+    local scale = new("UIScale", { Scale = 1 }, root)
+    local function setRaised(raised, animate)
+        local offset = raised and 28 or 0
+        local targets = { root }
+        for _, descendant in ipairs(root:GetDescendants()) do
+            table.insert(targets, descendant)
+        end
+        for _, object in ipairs(targets) do
+            if object:IsA("GuiObject") then
+                if originalZ[object] == nil then originalZ[object] = object.ZIndex end
+                object.ZIndex = originalZ[object] + offset
+            end
+        end
+        if scale.Parent then
+            local targetScale = raised and (raisedScale or 1.04) or 1
+            if animate then
+                TweenService:Create(scale, TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = targetScale }):Play()
+            else
+                scale.Scale = targetScale
+            end
+        end
+    end
+    return setRaised
+end
+
     local function setGlass(t)
         GTrans = math.clamp(t, 0, 0.9)
         for i = #glass, 1, -1 do
@@ -515,6 +548,57 @@ function Library:CreateWindow(WindowName, Config)
         return t.Ink:Lerp(t.Paper, 0.45)
     end
 
+    -- Singleton guard: remove the previous copy before creating this one.
+    -- The registry covers executor reloads; root scanning covers older builds
+    -- that predate the registry attribute.
+    local singletonEnv
+    do
+        local getgenvFunction = getExecutorFunction("getgenv")
+        if getgenvFunction then
+            local ok, env = pcall(getgenvFunction)
+            if ok and type(env) == "table" then singletonEnv = env end
+        end
+        if not singletonEnv then
+            local ok, env = pcall(function() return _G end)
+            if ok and type(env) == "table" then singletonEnv = env end
+        end
+
+        if singletonEnv then
+            local previous = rawget(singletonEnv, "__UILibrary_MainUI")
+            if typeof(previous) == "Instance" then
+                pcall(function() previous:Destroy() end)
+            end
+        end
+
+        local roots = {}
+        local function addRoot(root)
+            if not root then return end
+            for _, existing in ipairs(roots) do
+                if existing == root then return end
+            end
+            table.insert(roots, root)
+        end
+        local getHiddenUI = getExecutorFunction("gethui")
+        if getHiddenUI then
+            local ok, hiddenUI = pcall(getHiddenUI)
+            if ok then addRoot(hiddenUI) end
+        end
+        local okCore, coreGui = pcall(function() return game:GetService("CoreGui") end)
+        if okCore then addRoot(coreGui) end
+        local okPlayer, playerGui = pcall(function()
+            return LocalPlayer and (LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 2))
+        end)
+        if okPlayer then addRoot(playerGui) end
+
+        for _, root in ipairs(roots) do
+            for _, child in ipairs(root:GetChildren()) do
+                if child:IsA("ScreenGui") and (child.Name == "MainUI" or child:GetAttribute("UILibraryManaged") == "CoffeeIFY") then
+                    pcall(function() child:Destroy() end)
+                end
+            end
+        end
+    end
+
     local gui = new("ScreenGui", {
         Name = "MainUI",
         ResetOnSpawn = false,
@@ -522,6 +606,26 @@ function Library:CreateWindow(WindowName, Config)
         ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
         DisplayOrder = Config.DisplayOrder or 999,
     })
+    gui:SetAttribute("UILibraryManaged", "CoffeeIFY")
+    if singletonEnv then
+        pcall(function() rawset(singletonEnv, "__UILibrary_MainUI", gui) end)
+    end
+    gui.Destroying:Connect(function()
+        for _, connection in ipairs(connections) do
+            pcall(function() connection:Disconnect() end)
+        end
+        pcall(function()
+            local introBlur = game:GetService("Lighting"):FindFirstChild("IntroBlur")
+            if introBlur then introBlur:Destroy() end
+        end)
+        if singletonEnv then
+            pcall(function()
+                if rawget(singletonEnv, "__UILibrary_MainUI") == gui then
+                    rawset(singletonEnv, "__UILibrary_MainUI", nil)
+                end
+            end)
+        end
+    end)
 
 do
     local placed = false
@@ -633,6 +737,37 @@ persistTheme()
 local function save()
     persistTheme()
     SaveConfig(main)
+end
+
+local function setFontFamily(name)
+    if type(name) ~= "string" or not FontPresets[name] then return false end
+    FontFamily = name
+    for index = #fontObjects, 1, -1 do
+        local entry = fontObjects[index]
+        if not entry.instance or entry.instance.Parent == nil then
+            table.remove(fontObjects, index)
+        else
+            applyFont(entry.instance, entry.size, entry.bold)
+        end
+    end
+    persistTheme()
+    return true
+end
+
+local function setFontScale(percent)
+    local value = tonumber(percent)
+    if not value or value ~= value then return false end
+    FontScale = math.clamp(value / 100, 0.75, 1.35)
+    for index = #fontObjects, 1, -1 do
+        local entry = fontObjects[index]
+        if not entry.instance or entry.instance.Parent == nil then
+            table.remove(fontObjects, index)
+        else
+            applyFont(entry.instance, entry.size, entry.bold)
+        end
+    end
+    persistTheme()
+    return true
 end
 
 local function makeDraggable(handle, target, onEnd, scaleProvider)
@@ -747,12 +882,32 @@ local gearBtn = new("ImageButton", {
     ZIndex = 5,
 }, top)
 bind(gearBtn, "ImageColor3", "Cream")
+local setGearRaised = makeRaiseController(gearBtn, 1.08)
 gearBtn.MouseEnter:Connect(function()
+    setGearRaised(true, true)
     tw(gearBtn, 0.12, { ImageTransparency = 0 })
+    if Library._sfx then Library._sfx("hover") end
 end)
 gearBtn.MouseLeave:Connect(function()
+    setGearRaised(false, true)
     tw(gearBtn, 0.12, { ImageTransparency = 0.45 })
 end)
+if UserInputService.TouchEnabled then
+    local gearTouch
+    gearBtn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch then
+            gearTouch = input
+            setGearRaised(true, true)
+            if Library._sfx then Library._sfx("hover") end
+        end
+    end)
+    connect(UserInputService.InputEnded, function(input)
+        if gearTouch and input == gearTouch then
+            gearTouch = nil
+            setGearRaised(false, true)
+        end
+    end)
+end
 
 local function hline(parent, pos, size)
     local f = new("Frame", { Position = pos, Size = size, BorderSizePixel = 0, ZIndex = 2 }, parent)
@@ -1306,7 +1461,9 @@ local function playWindowStyle(shouldOpen, style)
 end
 
 local sfxInitialized = false
+local authOutroStarted = false
 local function SetWindowOpen(shouldOpen)
+    if authOutroStarted and shouldOpen then return end
     if animating or shouldOpen == main.Visible then
         return
     end
@@ -1326,6 +1483,34 @@ local function SetWindowOpen(shouldOpen)
         return
     end
     playWindowStyle(shouldOpen, OpenCloseAnimation)
+end
+
+local function DestroyAfterAuthOutro()
+    if authOutroStarted then return end
+    authOutroStarted = true
+    task.spawn(function()
+        -- Let an in-progress intro/open animation finish before starting the outro.
+        local deadline = os.clock() + 2
+        while animating and gui.Parent and os.clock() < deadline do
+            task.wait(0.05)
+        end
+        if not gui.Parent then return end
+
+        if not main.Visible then main.Visible = true end
+        if not animating then
+            SetWindowOpen(false)
+        else
+            -- Defensive fallback if an executor leaves an animation locked.
+            local targetPosition = offsetUDim2(main.Position, 0, 18)
+            TweenService:Create(main, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+                Position = targetPosition,
+                BackgroundTransparency = 1,
+            }):Play()
+        end
+
+        task.wait(OpenCloseAnimation == "None" and 0.12 or 1.15)
+        if gui.Parent then gui:Destroy() end
+    end)
 end
 
 runThemeTransition = function(applyChange)
@@ -1426,6 +1611,7 @@ local toggleBtn = new("ImageButton", {
     Image = "",
 }, gui)
 toggleUIScale = new("UIScale", { Scale = ToggleButtonScalePercent / 100 }, toggleBtn)
+local setToggleBtnRaised = makeRaiseController(toggleBtn, 1.08)
 local tbVisual = new("Frame", {
     Name = "Visual",
     BackgroundTransparency = 1,
@@ -1605,8 +1791,30 @@ toggleBtn.Visible = isMobile
 local tbMoved = makeDraggable(toggleBtn, nil, nil, function()
     return ToggleButtonScalePercent / 100
 end)
+toggleBtn.MouseEnter:Connect(function()
+    setToggleBtnRaised(true, true)
+    if Library._sfx then Library._sfx("hover") end
+end)
+toggleBtn.MouseLeave:Connect(function() setToggleBtnRaised(false, true) end)
+if UserInputService.TouchEnabled then
+    local toggleTouch
+    toggleBtn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch then
+            toggleTouch = input
+            setToggleBtnRaised(true, true)
+            if Library._sfx then Library._sfx("hover") end
+        end
+    end)
+    connect(UserInputService.InputEnded, function(input)
+        if toggleTouch and input == toggleTouch then
+            toggleTouch = nil
+            setToggleBtnRaised(false, true)
+        end
+    end)
+end
 toggleBtn.MouseButton1Click:Connect(function()
     if not tbMoved() then
+        if Library._sfx then Library._sfx("select") end
         SetWindowOpen(not main.Visible)
     end
 end)
@@ -1626,6 +1834,10 @@ new("UIListLayout", {
 }, toastHolder)
 
 local function Notify(text, duration, opts)
+    if type(text) == "table" then
+        opts = text
+        text = opts.Text or opts.Description or ""
+    end
     opts = type(opts) == "table" and opts or {}
     text = tostring(text or opts.Text or opts.Description or "")
     local title = opts.Title
@@ -1670,8 +1882,26 @@ local function Notify(text, duration, opts)
     end)
     local cardStroke = new("UIStroke", { Thickness = 1 }, card)
     bind(cardStroke, "Color", "Line")
-    local bar = new("Frame", { Size = UDim2.new(0, 4, 1, 0), BorderSizePixel = 0, ZIndex = 52 }, card)
+    -- Notification accent: slightly slimmer main indigo rail plus a fine parallel pinstripe.
+    -- Both stay in the left gutter; the label keeps its existing 16px inset and is never covered.
+    local bar = new("Frame", {
+        Name = "AccentRail",
+        Position = UDim2.fromOffset(0, 0),
+        Size = UDim2.new(0, 3, 1, 0),
+        BorderSizePixel = 0,
+        ZIndex = 52,
+    }, card)
     bind(bar, "BackgroundColor3", "Accent")
+
+    local accentPinstripe = new("Frame", {
+        Name = "AccentPinstripe",
+        Position = UDim2.fromOffset(6, 0),
+        Size = UDim2.new(0, 1, 1, 0),
+        BorderSizePixel = 0,
+        ZIndex = 52,
+    }, card)
+    bind(accentPinstripe, "BackgroundColor3", "Accent")
+
     lab.Size = UDim2.new(1, -28, 1, 0)
     lab.Parent = card
 
@@ -1768,6 +1998,7 @@ local ToggleSettingsVisibility = function() end
 local OpenSettingsFn = function() end
 local CloseSettingsFn = function() end
 gearBtn.MouseButton1Click:Connect(function()
+    if Library._sfx then Library._sfx("select") end
     ToggleSettingsVisibility()
 end)
 
@@ -2115,6 +2346,7 @@ local catLabel = new("TextLabel", {
 bindFont(catLabel, 13, false)
 
 local catHover = false
+local setCategoryRaised = makeRaiseController(btn, 1.035)
 local function catLook(animate)
     local selected = btn:GetAttribute("CategorySelected") == true
     local dur = animate and 0.16 or 0
@@ -2127,12 +2359,7 @@ local function catLook(animate)
     selLineTop.Visible = selected
     selLineBot.Visible = selected
     -- Raise ZIndex above siblings when hovered or selected
-    local z = (selected or catHover) and 8 or 1
-    btn.ZIndex = z
-    tabFill.ZIndex = z
-    tabWipe.ZIndex = z
-    catLabel.ZIndex = z + 1
-    if catMarker then catMarker.ZIndex = z + 1 end
+    setCategoryRaised(selected or catHover, animate)
     tw(catLabel, dur, { TextColor3 = lit and Theme.Cream or Theme.Ink })
     local markCol = lit and Theme.Cream or Theme.Accent
     if catAsset then
@@ -2141,8 +2368,30 @@ local function catLook(animate)
         catMarker.BackgroundColor3 = markCol
     end
 end
-btn.MouseEnter:Connect(function() catHover = true; catLook(true) end)
+btn.MouseEnter:Connect(function()
+    catHover = true
+    catLook(true)
+    if Library._sfx then Library._sfx("hover") end
+end)
 btn.MouseLeave:Connect(function() catHover = false; catLook(true) end)
+if UserInputService.TouchEnabled then
+    local categoryTouch
+    btn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch then
+            categoryTouch = input
+            catHover = true
+            catLook(true)
+            if Library._sfx then Library._sfx("hover") end
+        end
+    end)
+    connect(UserInputService.InputEnded, function(input)
+        if categoryTouch and input == categoryTouch then
+            categoryTouch = nil
+            catHover = false
+            catLook(true)
+        end
+    end)
+end
 btn:GetAttributeChangedSignal("CategorySelected"):Connect(function() catLook(true) end)
 table.insert(lookers, { row = btn, fn = catLook })
 catLook(false)
@@ -2223,22 +2472,14 @@ local function nextOrder()
     return order
 end
 
-local function SelectTab()
+local function SelectTab(silent)
     -- AUTH tab is always allowed while locked; everything else is blocked
     local isAuthTab = (CategoryName == "AUTH")
     if KeySystemEnabled and not KeyAuthenticated and not isAuthTab then
-        KeyFailClicks = KeyFailClicks + 1
         Notify("Complete authentication first.", 3.5)
-        if KeyFailClicks >= 3 then
-            local char = LocalPlayer and LocalPlayer.Character
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            if hum then
-                hum.Health = 0
-            end
-            Notify("Authentication failed. Session terminated.", 4)
-        end
         return
     end
+    if not silent and Library._sfx then Library._sfx("select") end
     SettingsState.open = false
     for _, page in ipairs(ContentContainer:GetChildren()) do
         if page:IsA("ScrollingFrame") then
@@ -2256,9 +2497,9 @@ local function SelectTab()
     btn:SetAttribute("CategorySelected", true)
 end
 if not Hidden then
-    btn.MouseButton1Click:Connect(SelectTab)
+    btn.MouseButton1Click:Connect(function() SelectTab(false) end)
     if isFirstTab and (not KeySystemEnabled or KeyAuthenticated) then
-        SelectTab()
+        SelectTab(true)
         isFirstTab = false
     elseif isFirstTab then
         isFirstTab = false
@@ -2316,7 +2557,8 @@ return l
 end
 
 local function hoverable(o)
-    local state = { hover = false }
+    local state = { hover = false, pressed = false }
+    local setRaised = makeRaiseController(o.row, 1.04)
     local fullSize = o.wipeHeight and UDim2.new(1, 0, 0, o.wipeHeight) or UDim2.new(1, 0, 1, 0)
     local emptySize = o.wipeHeight and UDim2.new(0, 0, 0, o.wipeHeight) or UDim2.new(0, 0, 1, 0)
 
@@ -2365,8 +2607,9 @@ local function look(animate)
         tw(l, dur, { TextColor3 = h and Theme.Cream or (o.color or Theme.Ink) })
     end
     local active = o.active and o.active() or false
+    setRaised(h or state.pressed or active, animate)
     if o.hasIcon then
-        o.marker.ImageColor3 = h and Theme.Cream or Theme.Accent
+        o.marker.ImageColor3 = (h or active) and Theme.Cream or Theme.Accent
     else
         o.marker.BackgroundColor3 = (h or active) and Theme.Cream or Theme.Accent
     end
@@ -2376,8 +2619,30 @@ local function look(animate)
     end
 end
 local target = o.target or o.row
-target.MouseEnter:Connect(function() state.hover = true; look(true) end)
+target.MouseEnter:Connect(function()
+    state.hover = true
+    look(true)
+    if Library._sfx then Library._sfx("hover") end
+end)
 target.MouseLeave:Connect(function() state.hover = false; look(true) end)
+if UserInputService.TouchEnabled then
+    local activeTouch
+    target.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch then
+            activeTouch = input
+            state.pressed = true
+            look(true)
+            if Library._sfx then Library._sfx("hover") end
+        end
+    end)
+    connect(UserInputService.InputEnded, function(input)
+        if activeTouch and input == activeTouch then
+            activeTouch = nil
+            state.pressed = false
+            look(true)
+        end
+    end)
+end
 table.insert(lookers, { row = o.row, fn = look })
 look(false)
 return state, look, wipe
@@ -2468,6 +2733,7 @@ function CategoryElements:CreateButton(ButtonText, IconName, TextColor, Callback
     })
 
 row.MouseButton1Click:Connect(function()
+    if Library._sfx then Library._sfx("select") end
     wipe.BackgroundColor3 = Theme.Accent:Lerp(Theme.Cream, 0.35)
     task.delay(0.1, function()
         wipe.BackgroundColor3 = Theme.Accent
@@ -2963,6 +3229,7 @@ if Flag then save() end
 end)
 
 header.MouseButton1Click:Connect(function()
+    if Library._sfx then Library._sfx("select") end
     expanded = not expanded
     svBox.Visible = expanded
     hueBar.Visible = expanded
@@ -3086,6 +3353,7 @@ local function paintMarks()
         local selected
         if multi then selected = selSet[e.value] == true else selected = currentVal == e.value end
         e.mark.Text = selected and "◆" or ""
+        if e.setRaised then e.setRaised(selected or e.hovering or e.pressed, true) end
     end
     lbl.Text = headerText()
 end
@@ -3130,21 +3398,48 @@ local ol = new("TextLabel", {
 }, b)
 bindFont(ol, 13, false)
 bind(ol, "TextColor3", "Ink")
-local entry = { btn = b, value = opt, mark = mark, text = string.lower(tostring(opt)) }
+local entry = { btn = b, value = opt, mark = mark, text = string.lower(tostring(opt)), hovering = false, pressed = false }
+entry.setRaised = makeRaiseController(b, 1.025)
 table.insert(entries, entry)
 
 b.MouseEnter:Connect(function()
+    entry.hovering = true
+    entry.setRaised(true, true)
+    if Library._sfx then Library._sfx("hover") end
     b.BackgroundTransparency = 0
     b.BackgroundColor3 = Theme.Accent
     ol.TextColor3 = Theme.Cream
     mark.TextColor3 = Theme.Cream
 end)
 b.MouseLeave:Connect(function()
+    entry.hovering = false
+    local selected = multi and selSet[opt] == true or (not multi and currentVal == opt)
+    entry.setRaised(selected or entry.pressed, true)
     b.BackgroundTransparency = 1
     ol.TextColor3 = Theme.Ink
     mark.TextColor3 = Theme.Accent
 end)
+if UserInputService.TouchEnabled then
+    local optionTouch
+    b.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch then
+            optionTouch = input
+            entry.pressed = true
+            entry.setRaised(true, true)
+            if Library._sfx then Library._sfx("hover") end
+        end
+    end)
+    connect(UserInputService.InputEnded, function(input)
+        if optionTouch and input == optionTouch then
+            optionTouch = nil
+            entry.pressed = false
+            local selected = multi and selSet[opt] == true or (not multi and currentVal == opt)
+            entry.setRaised(selected or entry.hovering, true)
+        end
+    end)
+end
 b.MouseButton1Click:Connect(function()
+    if Library._sfx then Library._sfx("select") end
     if multi then
         setChecked(entry, not selSet[opt])
     else
@@ -3202,7 +3497,16 @@ local function quickBtn(txt, xScale, fn)
 bind(qb, "BackgroundColor3", "Row")
 bind(qb, "TextColor3", "Ink")
 bindFont(qb, 12, true)
-qb.MouseButton1Click:Connect(fn)
+local setQuickRaised = makeRaiseController(qb, 1.04)
+qb.MouseEnter:Connect(function()
+    setQuickRaised(true, true)
+    if Library._sfx then Library._sfx("hover") end
+end)
+qb.MouseLeave:Connect(function() setQuickRaised(false, true) end)
+qb.MouseButton1Click:Connect(function()
+    if Library._sfx then Library._sfx("select") end
+    fn()
+end)
 end
 quickBtn("Select All", 0, function()
     for _, e in ipairs(entries) do
@@ -3221,6 +3525,7 @@ end)
 end
 
 header.MouseButton1Click:Connect(function()
+    if Library._sfx then Library._sfx("select") end
     isOpen = not isOpen
     search.Text = ""
     for _, e in ipairs(entries) do
@@ -3360,6 +3665,7 @@ function WindowElements:EnableKeySystem(expectedKey, note)
     KeySystemEnabled = true
     KeyAuthenticated = false
     KeyFailClicks = 0
+    authOutroStarted = false
     if expectedKey then ExpectedKey = tostring(expectedKey) end
     if note then KeyNote = tostring(note) end
 end
@@ -3384,9 +3690,9 @@ function WindowElements:Hide() SetWindowOpen(false) end
 function WindowElements:ToggleVisibility() SetWindowOpen(not main.Visible) end
 function WindowElements:Destroy()
     for _, c in ipairs(connections) do
-        c:Disconnect()
+        pcall(function() c:Disconnect() end)
     end
-    gui:Destroy()
+    if gui and gui.Parent then gui:Destroy() end
 end
 
 connect(UserInputService.InputBegan, function(input, processed)
@@ -3488,6 +3794,47 @@ if Config.ShowSettingsTab ~= false then
                 save()
             end)
 
+            local fontFamilyOptions = {}
+            for fontName in pairs(FontPresets) do
+                table.insert(fontFamilyOptions, fontName)
+            end
+            table.sort(fontFamilyOptions)
+            SettingsTab:CreateDropdown("Font Family", "lucide-type", fontFamilyOptions, FontFamily, nil, function(selected)
+                if setFontFamily(selected) then save() end
+            end)
+
+            SettingsTab:CreateSlider("Font Scale (%)", "lucide-text-cursor-input", 75, 135, math.floor(FontScale * 100 + 0.5), function(v)
+                if setFontScale(v) then save() end
+            end)
+
+            SettingsTab:CreateToggle("Window Border", "lucide-square", BorderEnabled, function(enabled)
+                BorderEnabled = enabled == true
+                mainStroke.Enabled = BorderEnabled
+                persistTheme()
+                save()
+            end)
+
+            SettingsTab:CreateToggle("Background Image", "lucide-image", BgImageEnabled, function(enabled)
+                UpdateBackgroundImageEnabled(enabled == true)
+                persistTheme()
+                save()
+            end)
+
+            local backgroundAssetBox = SettingsTab:CreateTextbox("Background Image Asset ID", "lucide-image", "rbxassetid://...", nil, function(value)
+                UpdateBackgroundImage(value)
+                persistTheme()
+                save()
+            end)
+            if backgroundAssetBox and backgroundAssetBox.Set then
+                backgroundAssetBox.Set(BgImage)
+            end
+
+            SettingsTab:CreateSlider("Background Image Transparency (%)", "lucide-image", 0, 100, math.floor(BgImageTransparency * 100 + 0.5), function(v)
+                UpdateBackgroundImageTransparency(v / 100)
+                persistTheme()
+                save()
+            end)
+
             SettingsTab:CreateSlider(T.OverallScaleLabel, "lucide-scaling", 70, 130, OverallScalePercent, "OverallScalePercent", function(v)
                 SetOverallScale(v)
             end)
@@ -3530,7 +3877,7 @@ if Config.ShowSettingsTab ~= false then
                     listeningKey = true
                     keyBtn.SetText(T.PressKey)
                     local conn
-                    conn = UserInputService.InputBegan:Connect(function(input)
+                    conn = connect(UserInputService.InputBegan, function(input)
                         if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
                         if input.KeyCode == Enum.KeyCode.Unknown then return end
                         conn:Disconnect()
@@ -3555,6 +3902,74 @@ end
 -- Internal Hello tab
 task.defer(function()
     local HelloTab, HelloPage = WindowElements:CreateCategory("Hello", "lucide-heart", false)
+
+    local playerName = (LocalPlayer and (LocalPlayer.DisplayName ~= "" and LocalPlayer.DisplayName or LocalPlayer.Name)) or "User"
+    local username = (LocalPlayer and LocalPlayer.Name) or ""
+    local profileHeader = new("Frame", {
+        Name = "ProfileWelcome",
+        Size = UDim2.new(1, 0, 0, 66),
+        LayoutOrder = 0,
+        BackgroundTransparency = 1,
+        ZIndex = 70,
+    }, HelloPage)
+
+    local avatar = new("ImageLabel", {
+        Name = "UserAvatar",
+        Position = UDim2.fromOffset(2, 5),
+        Size = UDim2.fromOffset(54, 54),
+        BackgroundColor3 = Theme.Row,
+        BackgroundTransparency = 0,
+        BorderSizePixel = 0,
+        Image = "",
+        ScaleType = Enum.ScaleType.Crop,
+        ZIndex = 82,
+    }, profileHeader)
+    new("UICorner", { CornerRadius = UDim.new(1, 0) }, avatar)
+    local avatarStroke = new("UIStroke", { Thickness = 2, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, avatar)
+    bind(avatarStroke, "Color", "Accent")
+
+    local welcomeText = new("TextLabel", {
+        Name = "WelcomeText",
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(68, 10),
+        Size = UDim2.new(1, -72, 0, 26),
+        Text = "Welcome, " .. tostring(playerName),
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        ZIndex = 81,
+    }, profileHeader)
+    bindFont(welcomeText, 16, true)
+    bind(welcomeText, "TextColor3", "Ink")
+
+    local usernameText = new("TextLabel", {
+        Name = "UsernameText",
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(69, 36),
+        Size = UDim2.new(1, -73, 0, 18),
+        Text = username ~= "" and ("@" .. username) or "",
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        ZIndex = 81,
+    }, profileHeader)
+    bindFont(usernameText, 11, false)
+    bind(usernameText, "TextColor3", "Accent")
+
+    if LocalPlayer then
+        task.spawn(function()
+            local okThumb, imageUrl = pcall(function()
+                local content, _ = Players:GetUserThumbnailAsync(
+                    LocalPlayer.UserId,
+                    Enum.ThumbnailType.HeadShot,
+                    Enum.ThumbnailSize.Size150x150
+                )
+                return content
+            end)
+            if okThumb and type(imageUrl) == "string" and avatar.Parent then
+                avatar.Image = imageUrl
+            end
+        end)
+    end
+
     HelloTab:CreateLabel("HELLO")
     -- Paragraph (wrapped, multi-line)
     local para = new("Frame", {
@@ -3565,7 +3980,7 @@ task.defer(function()
     local pl = new("TextLabel", {
         BackgroundTransparency = 1,
         Size = UDim2.new(1, 0, 1, 0),
-        Text = "UI library by jawolskimanowski\nVisual design: nicer\nFeedback: jawolskimanowski@gmail.com",
+        Text = "Visual design & most of the core script: Nier\nAdditional UI work: jawolskimanowski\nFeedback: jawolskimanowski@gmail.com",
         TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top,
         TextWrapped = true,
@@ -3586,6 +4001,7 @@ if KeySystemEnabled then
         local lastTyped = ""
 
         AuthTab:CreateButton("VERIFY KEY", function()
+            if authOutroStarted then return end
             local typed = ""
             if keyBox and keyBox.Get then
                 typed = tostring(keyBox.Get() or "")
@@ -3637,10 +4053,8 @@ if KeySystemEnabled then
                 KeyFailClicks = KeyFailClicks + 1
                 Notify({ Title = "INVALID KEY", Description = "Complete authentication first. (" .. tostring(KeyFailClicks) .. "/3)", Duration = 3 })
                 if KeyFailClicks >= 3 then
-                    local char = LocalPlayer and LocalPlayer.Character
-                    local hum = char and char:FindFirstChildOfClass("Humanoid")
-                    if hum then hum.Health = 0 end
-                    Notify("Authentication failed. Session terminated.", 4)
+                    Notify({ Title = "AUTHENTICATION FAILED", Description = "The interface is closing.", Duration = 2.5 })
+                    DestroyAfterAuthOutro()
                 end
             end
         end)
@@ -3729,6 +4143,12 @@ if Config.ShowIntro ~= false then
         bind(dismiss, "BackgroundColor3", "Accent")
         bind(dismiss, "TextColor3", "Cream")
         bindFont(dismiss, 13, true)
+        local setDismissRaised = makeRaiseController(dismiss, 1.04)
+        dismiss.MouseEnter:Connect(function()
+            setDismissRaised(true, true)
+            if Library._sfx then Library._sfx("hover") end
+        end)
+        dismiss.MouseLeave:Connect(function() setDismissRaised(false, true) end)
 
         local function closeIntro()
             tw(overlay, 0.25, { BackgroundTransparency = 1 })
@@ -3738,7 +4158,10 @@ if Config.ShowIntro ~= false then
                 if blur.Parent then blur:Destroy() end
             end)
         end
-        dismiss.MouseButton1Click:Connect(closeIntro)
+        dismiss.MouseButton1Click:Connect(function()
+            if Library._sfx then Library._sfx("select") end
+            closeIntro()
+        end)
         -- auto-dismiss after long delay
         task.delay(12, function()
             if overlay.Parent then closeIntro() end
