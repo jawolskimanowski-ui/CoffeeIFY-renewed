@@ -11,6 +11,25 @@
 --   local window = Library:CreateWindow("Lucent", { layout = layout })
 -- Layout defaults. Set Library.layout.ify to "2" for a two-column window,
 -- or pass Config.layout = { ify = "2" } to configure a single window.
+--[[
+CHANGELOG (compared with the original UILibrary.lua)
+
+- Enhanced: delayed drag handling, draggable notification cards, optional theme
+  gradients/direction, persisted drag/gradient preferences, and public setters.
+- Extensible: opt-in extension registry, themed helper components, and theme
+  color getter/setter support.
+- Two-column: layout.ify supports "1" (original) and "2" (balanced columns),
+  with compact control layouts and responsive fallback.
+- Settings fix: Settings is built synchronously and ClearItems preserves the
+  two-column containers when controls are rebuilt.
+- Current: Settings and the internal Hello page are pinned to column 1; Hello
+  is built synchronously and contains the visible changelog.
+
+The original UILibrary.lua and UILibrary_original.lua were byte-identical.
+The temporary SettingsRestored.lua is the single-column settings-timing branch;
+TwoColumn_SettingsFixed.lua is the two-column branch used for this build.
+]]
+
 local Library = {}
 Library.layout = Library.layout or { ify = "1" }
 function Library:SetLayoutMode(value)
@@ -2843,8 +2862,18 @@ local function categoryItemParent(estimatedHeight)
     if not useTwoColumns then
         return CategoryPage
     end
+
+    local height = math.max(tonumber(estimatedHeight) or 28, 1) + 7
+
+    -- Internal utility pages stay in column 1. Regular user categories keep
+    -- the height-balanced allocator across both columns.
+    if CategoryName == "SETTINGS" or CategoryName == "HELLO" then
+        ColumnHeights[1] += height
+        return ColumnFrames[1]
+    end
+
     local index = ColumnHeights[1] <= ColumnHeights[2] and 1 or 2
-    ColumnHeights[index] += math.max(tonumber(estimatedHeight) or 28, 1) + 7
+    ColumnHeights[index] += height
     return ColumnFrames[index]
 end
 
@@ -2877,6 +2906,28 @@ local order = 0
 local function nextOrder()
     order += 1
     return order
+end
+
+-- Remove only generated controls. Keep the category's layout containers alive,
+-- because control factories retain references to the two column frames.
+function CategoryElements:ClearItems()
+    if useTwoColumns and ColumnsHost and ColumnsHost.Parent then
+        for index, column in ipairs(ColumnFrames) do
+            for _, child in ipairs(column:GetChildren()) do
+                if not child:IsA("UIListLayout") then
+                    child:Destroy()
+                end
+            end
+            ColumnHeights[index] = 0
+        end
+    else
+        for _, child in ipairs(CategoryPage:GetChildren()) do
+            if not (child:IsA("UIListLayout") or child:IsA("UIPadding") or child.Name == "Heading") then
+                child:Destroy()
+            end
+        end
+    end
+    order = 0
 end
 
 local function SelectTab(silent)
@@ -4481,7 +4532,9 @@ function CategoryElements:CreateCustomFrame(Name, Height, Options)
     return frame
 end
 
-return CategoryElements, CategoryPage, btn
+-- Fourth return value is a stable parent for content that must remain in
+-- column 1 (or the page itself when the one-column layout is active).
+return CategoryElements, CategoryPage, btn, ColumnFrames[1] or CategoryPage
 end
 
 WindowElements.Flags = Flags
@@ -4646,7 +4699,9 @@ function WindowElements:GetGradientDirection()
 end
 
 if Config.ShowSettingsTab ~= false then
-    task.defer(function()
+    do
+        -- Create Settings synchronously so the gear button is ready as soon as
+        -- CreateWindow returns; task.defer left a window where clicks did nothing.
         local SettingsTab, SettingsPage = WindowElements:CreateCategory("Settings", "lucide-settings", true)
         local PreviousPage = nil
 
@@ -4699,11 +4754,7 @@ if Config.ShowSettingsTab ~= false then
 
         BuildSettingsUI = function()
             local T = Translations[Language] or Translations.en
-            for _, child in ipairs(SettingsPage:GetChildren()) do
-                if not (child:IsA("UIListLayout") or child:IsA("UIPadding") or child.Name == "Heading") then
-                    child:Destroy()
-                end
-            end
+            SettingsTab:ClearItems()
 
             SettingsTab:CreateLabel(T.PresetHeader, "lucide-palette")
             SettingsTab:CreateDropdown(T.PresetLabel, "lucide-palette", PresetOrder, CurrentPreset, nil, function(selected)
@@ -4845,22 +4896,24 @@ if Config.ShowSettingsTab ~= false then
         end
 
         BuildSettingsUI()
-    end)
+    end
 end
 
--- Internal Hello tab
-task.defer(function()
-    local HelloTab, HelloPage = WindowElements:CreateCategory("Hello", "lucide-heart", false)
+-- Internal Hello tab. It is created synchronously and permanently pinned
+-- to column 1, even while user-created categories use the two-column allocator.
+do
+    local HelloTab, HelloPage, _, HelloColumnOne = WindowElements:CreateCategory("Hello", "lucide-heart", false)
+    local HelloContentParent = HelloColumnOne or HelloPage
 
     local playerName = (LocalPlayer and (LocalPlayer.DisplayName ~= "" and LocalPlayer.DisplayName or LocalPlayer.Name)) or "User"
     local username = (LocalPlayer and LocalPlayer.Name) or ""
     local profileHeader = new("Frame", {
         Name = "ProfileWelcome",
         Size = UDim2.new(1, 0, 0, 66),
-        LayoutOrder = 0,
+        LayoutOrder = 1,
         BackgroundTransparency = 1,
         ZIndex = 70,
-    }, HelloPage)
+    }, HelloContentParent)
 
     local avatar = new("ImageLabel", {
         Name = "UserAvatar",
@@ -4919,24 +4972,152 @@ task.defer(function()
         end)
     end
 
-    HelloTab:CreateLabel("HELLO")
-    -- Paragraph (wrapped, multi-line)
-    local para = new("Frame", {
+    -- Hello content is authored directly inside HelloContentParent. This is
+    -- intentional: the changelog must be visible in the actual Hello page and
+    -- must never be sent through the normal two-column allocator.
+    local helloIntro = new("TextLabel", {
+        Name = "HelloIntro",
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, 72),
-        LayoutOrder = 99,
-    }, HelloPage)
-    local pl = new("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        Position = UDim2.new(),
+        LayoutOrder = 2,
+        Text = "Welcome to the library. The notes below summarize the changes made since the original UILibrary.lua.",
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        TextWrapped = true,
+    }, HelloContentParent)
+    bindFont(helloIntro, 12, false)
+    bind(helloIntro, "TextColor3", "Ink")
+
+    -- Visible changelog panel, parented directly to the internal Hello page's
+    -- first column (or the page itself in one-column mode).
+    local changelogPanel = new("Frame", {
+        Name = "HelloChangelogPanel",
+        BackgroundTransparency = 0.12,
+        BorderSizePixel = 0,
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        LayoutOrder = 3,
+        ClipsDescendants = false,
+    }, HelloContentParent)
+    bind(changelogPanel, "BackgroundColor3", "Row")
+    bindGlass(changelogPanel)
+    new("UICorner", { CornerRadius = UDim.new(0, 7) }, changelogPanel)
+    local changelogStroke = new("UIStroke", {
+        Thickness = 1,
+        Transparency = 0.58,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+    }, changelogPanel)
+    bind(changelogStroke, "Color", "Line")
+    new("UIPadding", {
+        PaddingLeft = UDim.new(0, 12),
+        PaddingRight = UDim.new(0, 12),
+        PaddingTop = UDim.new(0, 11),
+        PaddingBottom = UDim.new(0, 11),
+    }, changelogPanel)
+    new("UIListLayout", {
+        FillDirection = Enum.FillDirection.Vertical,
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Padding = UDim.new(0, 7),
+    }, changelogPanel)
+
+    local changelogHeading = new("TextLabel", {
+        Name = "ChangelogHeading",
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 1, 0),
+        Size = UDim2.new(1, 0, 0, 19),
+        LayoutOrder = 1,
+        Text = "CHANGELOG",
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Center,
+    }, changelogPanel)
+    bindFont(changelogHeading, 14, true)
+    bind(changelogHeading, "TextColor3", "Accent")
+
+    local changelogSubheading = new("TextLabel", {
+        Name = "ChangelogSubheading",
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 16),
+        LayoutOrder = 2,
+        Text = "ORIGINAL UILIBRARY.LUA  →  CURRENT BUILD",
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Center,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, changelogPanel)
+    bindFont(changelogSubheading, 9, true)
+    bind(changelogSubheading, "TextColor3", "Ink")
+    changelogSubheading.TextTransparency = 0.22
+
+    local function addHelloChangelogEntry(entryOrder, title, description)
+        local entry = new("Frame", {
+            Name = "ChangelogEntry",
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            LayoutOrder = entryOrder,
+        }, changelogPanel)
+        new("UIListLayout", {
+            FillDirection = Enum.FillDirection.Vertical,
+            SortOrder = Enum.SortOrder.LayoutOrder,
+            Padding = UDim.new(0, 2),
+        }, entry)
+
+        local entryTitle = new("TextLabel", {
+            Name = "EntryTitle",
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 16),
+            LayoutOrder = 1,
+            Text = title,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Center,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+        }, entry)
+        bindFont(entryTitle, 11, true)
+        bind(entryTitle, "TextColor3", "Accent")
+
+        local entryBody = new("TextLabel", {
+            Name = "EntryDescription",
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            LayoutOrder = 2,
+            Text = description,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Top,
+            TextWrapped = true,
+        }, entry)
+        bindFont(entryBody, 10, false)
+        bind(entryBody, "TextColor3", "Ink")
+        entryBody.TextTransparency = 0.08
+    end
+
+    addHelloChangelogEntry(3, "INTERACTION & NOTIFICATIONS",
+        "Added delayed hold-to-drag behavior and independently draggable notifications. The existing notification rail styling and slide/typewriter effects were retained. Drag timing and optional gradient preferences are configurable and saved.")
+    addHelloChangelogEntry(4, "THEME & GRADIENTS",
+        "Added optional theme gradients with direction choices, plus live theme-color modification for developers. Gradients can remain disabled to preserve the original flat appearance.")
+    addHelloChangelogEntry(5, "LAYOUT",
+        "Added layout.ify = \"1\" for the original single-column layout and layout.ify = \"2\" for balanced double columns. Responsive mode can fall back to one column on narrow screens. Internal Settings and Hello content are pinned to column 1.")
+    addHelloChangelogEntry(6, "DEVELOPER EXTENSIONS",
+        "Added extension registration and lookup/execution helpers, plus reusable Section, Divider, Spacer, Paragraph, Badge, ProgressBar, ActionCard, and CustomFrame components with update/destroy methods.")
+    addHelloChangelogEntry(7, "SETTINGS & INTERNAL PAGES",
+        "Settings initialization and rebuilding now preserve their column containers. The Hello page is created synchronously, and its profile header, changelog, and credits are parented directly to its first-column content area.")
+
+    -- Credits remain below the changelog and are also pinned to column 1.
+    local credits = new("TextLabel", {
+        Name = "HelloCredits",
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 48),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        LayoutOrder = 4,
         Text = "Visual design & most of the core script: Nier\nAdditional UI work: jawolskimanowski\nFeedback: jawolskimanowski@gmail.com",
         TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top,
         TextWrapped = true,
-    }, para)
-    bindFont(pl, 13, false)
-    bind(pl, "TextColor3", "Ink")
-end)
+    }, HelloContentParent)
+    bindFont(credits, 10, false)
+    bind(credits, "TextColor3", "Ink")
+    credits.TextTransparency = 0.2
+end
 
 -- Internal AUTH tab when key system is requested
 if KeySystemEnabled then
