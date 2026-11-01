@@ -52,7 +52,7 @@ CoffeeIFY is a customizable Roblox Luau UI library with a warm, paper-inspired v
 Place the library at a raw GitHub URL or another location that your environment can retrieve. Replace the placeholder URL below with the raw URL of **your hosted copy**.
 
 ```lua
-local Library = loadstring(game:HttpGet("YOUR_RAW_GITHUB_URL"))()
+local Library = loadstring(game:HttpGet("my_ui"))()
 
 local Window = Library:CreateWindow("CoffeeIFY", {
     Theme = "Paper",
