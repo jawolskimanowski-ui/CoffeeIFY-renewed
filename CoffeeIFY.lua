@@ -1,4 +1,23 @@
+-- UILibrary optional customization points:
+--   Library:RegisterExtension("Name", function(window, library) ... end)
+--   Config.Extensions = { "Name" }                 -- opt-in registered add-on
+--   category:CreateSection / CreateParagraph       -- reusable information blocks
+--   category:CreateBadge / CreateProgressBar       -- status and progress widgets
+--   category:CreateActionCard / CreateCustomFrame  -- custom controls and layouts
+--   window:SetThemeColor("Accent", Color3.fromRGB(...))
+-- Optional layout:
+--   local layout = { ify = "1" }
+--   layout.ify = "2"
+--   local window = Library:CreateWindow("Lucent", { layout = layout })
+-- Layout defaults. Set Library.layout.ify to "2" for a two-column window,
+-- or pass Config.layout = { ify = "2" } to configure a single window.
 local Library = {}
+Library.layout = Library.layout or { ify = "1" }
+function Library:SetLayoutMode(value)
+    self.layout = type(self.layout) == "table" and self.layout or {}
+    self.layout.ify = tostring(value) == "2" and "2" or "1"
+    return self.layout.ify
+end
 
 local HttpService = game:GetService("HttpService")
 local TweenService = game:GetService("TweenService")
@@ -28,6 +47,49 @@ function Library:SetSoundVolume(value)
     self.SoundVolume = math.clamp(volume, 0, 1)
     return true
 end
+
+-- Optional extension registry.
+-- Register an add-on once, then opt into it per window with Config.Extensions.
+-- Extensions are never executed unless the user explicitly enables them.
+Library.Extensions = Library.Extensions or {}
+
+function Library:RegisterExtension(name, callback)
+    if type(name) ~= "string" or name == "" or type(callback) ~= "function" then
+        return false, "RegisterExtension expects a non-empty name and a function."
+    end
+    self.Extensions[name] = callback
+    return true
+end
+
+function Library:UnregisterExtension(name)
+    if type(name) ~= "string" or self.Extensions[name] == nil then
+        return false
+    end
+    self.Extensions[name] = nil
+    return true
+end
+
+function Library:GetExtension(name)
+    return type(name) == "string" and self.Extensions[name] or nil
+end
+
+--[[
+OPTIONAL EXTENSION EXAMPLE
+
+Library:RegisterExtension("StatusPanel", function(window, library)
+    local tab = window:CreateCategory("EXTRAS", "lucide-sparkles")
+    tab:CreateSection("Extra tools", "Only appears when this extension is enabled.")
+    tab:CreateParagraph("About", "Use these helpers to build optional UI without editing core controls.")
+    tab:CreateBadge("Extension", "ACTIVE")
+end)
+
+local window = Library:CreateWindow("My UI", {
+    Extensions = { "StatusPanel" },
+})
+
+You can also pass a direct callback in Config.Extensions:
+    Extensions = { function(window, library) ... end }
+]]
 
 local WHITE = Color3.new(1, 1, 1)
 
@@ -307,6 +369,16 @@ end
 function Library:CreateWindow(WindowName, Config)
     Config = Config or {}
 
+    local suppliedLayout = type(Config.layout) == "table" and Config.layout
+        or (type(Config.Layout) == "table" and Config.Layout)
+        or Library.layout
+    local layout = {
+        ify = tostring(suppliedLayout.ify or suppliedLayout.Ify or "1"),
+        Gap = math.clamp(tonumber(suppliedLayout.Gap or suppliedLayout.gap) or 14, 6, 28),
+        Responsive = suppliedLayout.Responsive ~= false and suppliedLayout.responsive ~= false,
+    }
+    if layout.ify ~= "2" then layout.ify = "1" end
+
     local ToggleConfig = Config.ToggleConfig or {}
     local isFirstTab = true
     local KeySystemEnabled = Config.KeySystem == true
@@ -348,6 +420,10 @@ function Library:CreateWindow(WindowName, Config)
     cfgColor("TeamColor", "Team")
 
     local GTrans = math.clamp(tonumber(Config.ElementTransparency) or 0.08, 0, 0.9)
+    local DragDelayMs = math.clamp(tonumber(Config.DragDelayMs or Config.DragDelay) or 140, 0, 600)
+    local GradientEffectsEnabled = Config.GradientEffects == true
+    local GradientDirectionOrder = { "Diagonal", "Horizontal", "Vertical" }
+    local GradientDirection = "Diagonal"
     local FontScale = math.clamp(tonumber(Config.FontScale) or 1, 0.75, 1.35)
     local OverallScalePercent = math.clamp(tonumber(Config.OverallScale) or 100, 70, 130)
     local ToggleButtonScalePercent = math.clamp(tonumber(Config.ToggleButtonScale) or 100, 50, 180)
@@ -358,7 +434,6 @@ function Library:CreateWindow(WindowName, Config)
     if cfgLang == "th" or cfgLang == "thai" then
         Language = "th"
     end
-    local StripAnim = Config.StripAnimation ~= false
 
     -- Page Transition Style: Pop + 3 other styles
     --   Pop        : the page scales up from its center with a soft Back overshoot while rows fade in
@@ -383,7 +458,6 @@ function Library:CreateWindow(WindowName, Config)
     end
     local PageAnimation = "Pop"
     local OpenCloseAnimation = "Classic"
-    StripAnim = true
     local CurrentPreset = (type(Config.Theme) == "string" and Presets[Config.Theme]) and Config.Theme or "Paper"
     local BorderEnabled = Config.BorderEnabled ~= false
     local BgImage = Config.BackgroundImage or ""
@@ -415,7 +489,6 @@ function Library:CreateWindow(WindowName, Config)
         if type(savedTheme.PresetName) == "string" and Presets[savedTheme.PresetName] then CurrentPreset = savedTheme.PresetName end
         if containsOption(PageAnimationOrder, savedTheme.PageAnimation) then PageAnimation = savedTheme.PageAnimation end
         if containsOption(OpenCloseAnimationOrder, savedTheme.OpenCloseAnimation) then OpenCloseAnimation = savedTheme.OpenCloseAnimation end
-        StripAnim = true
         if toggleKey ~= false and type(savedTheme.ToggleKey) == "string" then
             local okK, keyEnum = pcall(function()
                 return Enum.KeyCode[savedTheme.ToggleKey]
@@ -450,10 +523,20 @@ function Library:CreateWindow(WindowName, Config)
         if savedTheme.SoundVolume ~= nil then
             Library.SoundVolume = math.clamp(tonumber(savedTheme.SoundVolume) or 1, 0, 1)
         end
+        if savedTheme.DragDelayMs ~= nil then
+            DragDelayMs = math.clamp(tonumber(savedTheme.DragDelayMs) or 140, 0, 600)
+        end
+        if savedTheme.GradientEffects ~= nil then
+            GradientEffectsEnabled = savedTheme.GradientEffects == true
+        end
+        if containsOption(GradientDirectionOrder, savedTheme.GradientDirection) then
+            GradientDirection = savedTheme.GradientDirection
+        end
     end
     local SavedFlags = savedFlags or {}
 
     local themed, lookers, glass, fontObjects = {}, {}, {}, {}
+    local gradientObjects = {}
 
     local function resolve(spec)
         if type(spec) == "function" then
@@ -498,6 +581,68 @@ function Library:CreateWindow(WindowName, Config)
     local function bindGlass(inst)
         inst.BackgroundTransparency = GTrans
         table.insert(glass, inst)
+    end
+
+    local GradientAngles = { Diagonal = 35, Horizontal = 0, Vertical = 90 }
+    local function makeGradientSequence(baseColor, targetColor)
+        local function channel(target, base)
+            return math.clamp(target / math.max(base, 0.025), 0, 1)
+        end
+        local tint = Color3.new(
+            channel(targetColor.R, baseColor.R),
+            channel(targetColor.G, baseColor.G),
+            channel(targetColor.B, baseColor.B)
+        )
+        return ColorSequence.new(Color3.new(1, 1, 1), tint)
+    end
+
+    local function applyGradientSettings()
+        local baseAngle = GradientAngles[GradientDirection] or GradientAngles.Diagonal
+        for index = #gradientObjects, 1, -1 do
+            local entry = gradientObjects[index]
+            local gradient = entry.object
+            if not gradient or gradient.Parent == nil then
+                table.remove(gradientObjects, index)
+            else
+                gradient.Enabled = GradientEffectsEnabled
+                gradient.Rotation = baseAngle
+            end
+        end
+    end
+
+    local function addGradient(parent, colorProvider)
+        local gradient = new("UIGradient", {
+            Rotation = GradientAngles[GradientDirection] or GradientAngles.Diagonal,
+            Enabled = GradientEffectsEnabled,
+        }, parent)
+        bind(gradient, "Color", colorProvider)
+        table.insert(gradientObjects, { object = gradient })
+        applyGradientSettings()
+        return gradient
+    end
+
+    local function setGradientEffects(enabled)
+        GradientEffectsEnabled = enabled == true
+        applyGradientSettings()
+        return GradientEffectsEnabled
+    end
+
+    local function setGradientDirection(direction)
+        if not containsOption(GradientDirectionOrder, direction) then
+            return false
+        end
+        GradientDirection = direction
+        applyGradientSettings()
+        return true
+    end
+
+    local function setDragDelay(milliseconds)
+        local value = tonumber(milliseconds)
+        if not value or value ~= value then
+            return false
+        end
+        DragDelayMs = math.clamp(math.floor(value + 0.5), 0, 600)
+        return true
     end
 
 local function makeRaiseController(root, raisedScale)
@@ -668,7 +813,8 @@ end
 
 local camera = workspace.CurrentCamera
 local vp = camera and camera.ViewportSize or Vector2.new(1280, 720)
-local startSize = savedSize or UDim2.fromOffset(math.min(580, math.floor(vp.X * 0.94)), math.min(330, math.floor(vp.Y * 0.8)))
+local defaultWidth = layout.ify == "2" and 760 or 580
+local startSize = savedSize or UDim2.fromOffset(math.min(defaultWidth, math.floor(vp.X * 0.94)), math.min(330, math.floor(vp.Y * 0.8)))
 local startPos = savedPos or UDim2.new(0.5, -startSize.X.Offset / 2, 0.5, -startSize.Y.Offset / 2)
 
 local main = new("Frame", {
@@ -682,6 +828,9 @@ local main = new("Frame", {
 mainUIScale = new("UIScale", { Scale = OverallScalePercent / 100 }, main)
 bind(main, "BackgroundColor3", "Paper")
 bindGlass(main)
+addGradient(main, function(t)
+    return makeGradientSequence(t.Paper, t.Paper:Lerp(t.Accent, 0.13))
+end)
 local mainStroke = new("UIStroke", { Thickness = 1, Enabled = BorderEnabled }, main)
 bind(mainStroke, "Color", "Line")
 
@@ -722,7 +871,6 @@ local function persistTheme()
     ThemeSettings.FontFamily = FontFamily
     ThemeSettings.FontScale = FontScale
     ThemeSettings.Language = Language
-    ThemeSettings.StripAnimation = StripAnim
     ThemeSettings.BorderEnabled = BorderEnabled
     ThemeSettings.BackgroundImage = BgImage
     ThemeSettings.BackgroundImageTransparency = BgImageTransparency
@@ -732,6 +880,9 @@ local function persistTheme()
     ThemeSettings.OverallScalePercent = OverallScalePercent
     ThemeSettings.ToggleButtonScalePercent = ToggleButtonScalePercent
     ThemeSettings.SoundVolume = Library.SoundVolume
+    ThemeSettings.DragDelayMs = DragDelayMs
+    ThemeSettings.GradientEffects = GradientEffectsEnabled
+    ThemeSettings.GradientDirection = GradientDirection
 end
 persistTheme()
 local function save()
@@ -770,39 +921,180 @@ local function setFontScale(percent)
     return true
 end
 
-local function makeDraggable(handle, target, onEnd, scaleProvider)
-    target = target or handle
-    local dragging, dragStart, startP, moved = false, nil, nil, false
-    connect(handle.InputBegan, function(input)
-        if isPointer(input) then
-            dragging, moved = true, false
-            dragStart, startP = input.Position, target.Position
-            local c
-            c = input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    dragging = false
-                    c:Disconnect()
-                    if onEnd and moved then
-                        onEnd()
+local dragControllers = {}
+local activeDragState = nil
+
+local function finishDrag(state, input)
+    if state.input ~= input then
+        return
+    end
+
+    state.input = nil
+    state.pending = false
+    state.dragging = false
+    if activeDragState == state then
+        activeDragState = nil
+    end
+    if state.changedConnection then
+        state.changedConnection:Disconnect()
+        state.changedConnection = nil
+    end
+
+    if state.moved and state.onEnd then
+        pcall(state.onEnd)
+    end
+end
+
+-- One pair of global listeners services every draggable target. This avoids
+-- leaving a permanent InputChanged listener behind for each temporary toast.
+connect(UserInputService.InputChanged, function(input)
+    for _, state in ipairs(dragControllers) do
+        if state.input and isMove(input) then
+            local pointerType = state.input.UserInputType
+            if (pointerType == Enum.UserInputType.Touch and input == state.input)
+                or (pointerType == Enum.UserInputType.MouseButton1 and input.UserInputType == Enum.UserInputType.MouseMovement) then
+                state.pointerPosition = input.Position
+
+                if state.dragging and state.dragStart then
+                    local delta = state.pointerPosition - state.dragStart
+                    if delta.Magnitude > 4 then
+                        if not state.moved then
+                            state.moved = true
+                            if state.onBegin then
+                                pcall(state.onBegin)
+                            end
+                        end
+
+                        local scaleFactor = state.scaleProvider and state.scaleProvider() or 1
+                        scaleFactor = math.max(tonumber(scaleFactor) or 1, 0.01)
+                        local startPosition = state.startPosition
+                        state.target.Position = UDim2.new(
+                            startPosition.X.Scale,
+                            startPosition.X.Offset + delta.X / scaleFactor,
+                            startPosition.Y.Scale,
+                            startPosition.Y.Offset + delta.Y / scaleFactor
+                        )
+                        if state.onMove then
+                            pcall(state.onMove, state.target, delta)
+                        end
                     end
                 end
-            end)
-        end
-    end)
-    connect(UserInputService.InputChanged, function(input)
-        if dragging and isMove(input) then
-            local d = input.Position - dragStart
-            if d.Magnitude > 4 then
-                moved = true
             end
-            local scaleFactor = scaleProvider and scaleProvider() or 1
-            scaleFactor = math.max(tonumber(scaleFactor) or 1, 0.01)
-            local dx, dy = d.X / scaleFactor, d.Y / scaleFactor
-            target.Position = UDim2.new(startP.X.Scale, startP.X.Offset + dx, startP.Y.Scale, startP.Y.Offset + dy)
+        end
+    end
+end)
+
+connect(UserInputService.InputEnded, function(input)
+    for _, state in ipairs(dragControllers) do
+        if state.input == input then
+            finishDrag(state, input)
+        end
+    end
+end)
+
+local function makeDraggable(handle, target, onEnd, scaleProvider, delayProvider, onBegin, onMove)
+    target = target or handle
+    local state = {
+        target = target,
+        onEnd = onEnd,
+        scaleProvider = scaleProvider,
+        onBegin = onBegin,
+        onMove = onMove,
+        input = nil,
+        pending = false,
+        dragging = false,
+        moved = false,
+    }
+    table.insert(dragControllers, state)
+
+    local function removeController()
+        if state.input then
+            state.input = nil
+            state.pending = false
+            state.dragging = false
+            if activeDragState == state then
+                activeDragState = nil
+            end
+            if state.changedConnection then
+                state.changedConnection:Disconnect()
+                state.changedConnection = nil
+            end
+        end
+        for index = #dragControllers, 1, -1 do
+            if dragControllers[index] == state then
+                table.remove(dragControllers, index)
+                break
+            end
+        end
+    end
+
+    handle.InputBegan:Connect(function(input)
+        if not isPointer(input) or state.input or activeDragState then
+            return
+        end
+
+        activeDragState = state
+        state.input = input
+        state.pending = true
+        state.dragging = false
+        state.moved = false
+        state.pointerPosition = input.Position
+        state.startPosition = target.Position
+        state.dragStart = nil
+
+        local delayValue = type(delayProvider) == "function" and delayProvider() or delayProvider
+        delayValue = math.clamp(tonumber(delayValue) or 0, 0, 2)
+        local function activate()
+            if state.input ~= input or not state.pending then
+                return
+            end
+            state.pending = false
+            state.dragging = true
+            state.dragStart = state.pointerPosition
+            state.startPosition = target.Position
+        end
+
+        state.changedConnection = input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End or input.UserInputState == Enum.UserInputState.Cancel then
+                finishDrag(state, input)
+            end
+        end)
+
+        if delayValue <= 0 then
+            activate()
+        else
+            task.delay(delayValue, activate)
         end
     end)
+
+    target.Destroying:Connect(removeController)
+    if handle ~= target then
+        handle.Destroying:Connect(removeController)
+    end
+
     return function()
-        return moved
+        return state.moved
+    end
+end
+
+local function clampGuiToViewport(target)
+    if not target or not target.Parent then
+        return
+    end
+    local currentCamera = workspace.CurrentCamera
+    local viewport = currentCamera and currentCamera.ViewportSize or Vector2.new(1280, 720)
+    local absolutePosition = target.AbsolutePosition
+    local absoluteSize = target.AbsoluteSize
+    local clampedX = math.clamp(absolutePosition.X, 0, math.max(0, viewport.X - absoluteSize.X))
+    local clampedY = math.clamp(absolutePosition.Y, 0, math.max(0, viewport.Y - absoluteSize.Y))
+    local offsetX = clampedX - absolutePosition.X
+    local offsetY = clampedY - absolutePosition.Y
+    if offsetX ~= 0 or offsetY ~= 0 then
+        local position = target.Position
+        target.Position = UDim2.new(
+            position.X.Scale, position.X.Offset + offsetX,
+            position.Y.Scale, position.Y.Offset + offsetY
+        )
     end
 end
 
@@ -837,6 +1129,10 @@ local BODY_TOP = TITLE_H + STRIP_H
 local top = new("Frame", { Name = "TopBar", Size = UDim2.new(1, 0, 0, TITLE_H), BorderSizePixel = 0, ZIndex = 3 }, main)
 bind(top, "BackgroundColor3", function(t)
     return t.Accent:Lerp(t.Cream, 0.07)
+end)
+addGradient(top, function(t)
+    local base = t.Accent:Lerp(t.Cream, 0.07)
+    return makeGradientSequence(base, base:Lerp(t.Paper, 0.22))
 end)
 
 local titleX = 24
@@ -1037,7 +1333,11 @@ bind(railStroke, "Color", "Line")
 makeDraggable(top, main, function()
     save()
 end, function()
-return OverallScalePercent / 100
+    return OverallScalePercent / 100
+end, function()
+    return DragDelayMs / 1000
+end, nil, function(target)
+    clampGuiToViewport(target)
 end)
 
 local resizeBtn = new("TextButton", {
@@ -1790,6 +2090,10 @@ end
 toggleBtn.Visible = isMobile
 local tbMoved = makeDraggable(toggleBtn, nil, nil, function()
     return ToggleButtonScalePercent / 100
+end, function()
+    return DragDelayMs / 1000
+end, nil, function(target)
+    clampGuiToViewport(target)
 end)
 toggleBtn.MouseEnter:Connect(function()
     setToggleBtnRaised(true, true)
@@ -1821,17 +2125,41 @@ end)
 
 local toastHolder = new("Frame", {
     Name = "Toasts",
-    AnchorPoint = Vector2.new(0, 1),
-    Position = UDim2.new(0, 20, 1, -20),
-    Size = UDim2.fromOffset(460, 0),
-    AutomaticSize = Enum.AutomaticSize.Y,
+    Position = UDim2.fromScale(0, 0),
+    Size = UDim2.fromScale(1, 1),
     BackgroundTransparency = 1,
+    ClipsDescendants = false,
+    Active = false,
 }, gui)
-new("UIListLayout", {
-    Padding = UDim.new(0, 6),
-    VerticalAlignment = Enum.VerticalAlignment.Bottom,
-    SortOrder = Enum.SortOrder.LayoutOrder,
-}, toastHolder)
+
+local toastEntries = {}
+local function layoutToastEntries()
+    local stackOffset = 20
+    for index = #toastEntries, 1, -1 do
+        local entry = toastEntries[index]
+        if not entry.slot or entry.slot.Parent == nil then
+            table.remove(toastEntries, index)
+        elseif not entry.dragged then
+            entry.slot.AnchorPoint = Vector2.new(0, 1)
+            entry.slot.Position = UDim2.new(0, 20, 1, -stackOffset)
+            stackOffset += entry.height + 6
+        end
+    end
+end
+
+local function removeToastEntry(entry)
+    if entry.removed then
+        return
+    end
+    entry.removed = true
+    for index = #toastEntries, 1, -1 do
+        if toastEntries[index] == entry then
+            table.remove(toastEntries, index)
+            break
+        end
+    end
+    layoutToastEntries()
+end
 
 local function Notify(text, duration, opts)
     if type(text) == "table" then
@@ -1868,6 +2196,9 @@ local function Notify(text, duration, opts)
         BackgroundTransparency = 1,
         ClipsDescendants = true,
         Size = UDim2.fromOffset(w, 38),
+        AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.new(0, 20, 1, -20),
+        Active = true,
         ZIndex = 50,
     }, toastHolder)
     local card = new("Frame", {
@@ -1875,8 +2206,28 @@ local function Notify(text, duration, opts)
         Position = UDim2.fromScale(-1, 0),
         BorderSizePixel = 0,
         ClipsDescendants = true,
+        Active = true,
         ZIndex = 50,
     }, slot)
+
+    local toastEntry = { slot = slot, height = 38, dragged = false, removed = false }
+    table.insert(toastEntries, toastEntry)
+    layoutToastEntries()
+    makeDraggable(card, slot, nil, nil, function()
+        return DragDelayMs / 1000
+    end, function()
+        toastEntry.dragged = true
+        -- Reparenting brings the held toast above its siblings without changing
+        -- any of its accent rails, typography, glitch, or slide animations.
+        slot.Parent = nil
+        slot.Parent = toastHolder
+        layoutToastEntries()
+    end, function(target)
+        clampGuiToViewport(target)
+    end)
+    slot.Destroying:Connect(function()
+        removeToastEntry(toastEntry)
+    end)
     bind(card, "BackgroundColor3", function(t)
         return t.Paper:Lerp(t.Cream, 0.12)
     end)
@@ -2305,6 +2656,9 @@ local tabFill = new("Frame", {
     ZIndex = 1,
 }, btn)
 bind(tabFill, "BackgroundColor3", "Row")
+addGradient(tabFill, function(t)
+    return makeGradientSequence(t.Row, t.Row:Lerp(t.Accent, 0.18))
+end)
 local tabWipe = new("Frame", { Name = "Wipe", Size = UDim2.new(0, 0, 1, 0), BorderSizePixel = 0 }, tabFill)
 bind(tabWipe, "BackgroundColor3", "Accent")
 local selLineTop = new("Frame", {
@@ -2441,6 +2795,59 @@ local headLabel = new("TextLabel", {
 bindFont(headLabel, 24, false)
 bind(headLabel, "TextColor3", "Ink")
 
+-- The one-column path remains the original CategoryPage list. In two-column
+-- mode controls are allocated to whichever column currently has less content.
+local viewportWidth = vp and vp.X or 1280
+local useTwoColumns = layout.ify == "2" and (not layout.Responsive or viewportWidth >= 680)
+local ColumnsHost
+local ColumnFrames = {}
+local ColumnHeights = { 0, 0 }
+if useTwoColumns then
+    ColumnsHost = new("Frame", {
+        Name = "ColumnsHost",
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Size = UDim2.new(1, -62, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        LayoutOrder = 1,
+        ClipsDescendants = false,
+    }, CategoryPage)
+    new("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        HorizontalAlignment = Enum.HorizontalAlignment.Center,
+        VerticalAlignment = Enum.VerticalAlignment.Top,
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Padding = UDim.new(0, layout.Gap),
+    }, ColumnsHost)
+
+    for index, sideName in ipairs({ "Left", "Right" }) do
+        local column = new("Frame", {
+            Name = sideName .. "Column",
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            Size = UDim2.new(0.5, -layout.Gap / 2, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            LayoutOrder = index,
+            ClipsDescendants = false,
+        }, ColumnsHost)
+        new("UIListLayout", {
+            FillDirection = Enum.FillDirection.Vertical,
+            SortOrder = Enum.SortOrder.LayoutOrder,
+            Padding = UDim.new(0, 7),
+        }, column)
+        ColumnFrames[index] = column
+    end
+end
+
+local function categoryItemParent(estimatedHeight)
+    if not useTwoColumns then
+        return CategoryPage
+    end
+    local index = ColumnHeights[1] <= ColumnHeights[2] and 1 or 2
+    ColumnHeights[index] += math.max(tonumber(estimatedHeight) or 28, 1) + 7
+    return ColumnFrames[index]
+end
+
 local railThumb = new("Frame", {
     Name = CategoryName .. "Thumb",
     BorderSizePixel = 0,
@@ -2511,13 +2918,16 @@ local function newRow(className, height)
         Size = UDim2.new(1, 0, 0, height or 28),
         BorderSizePixel = 0,
         LayoutOrder = nextOrder(),
-    }, CategoryPage)
+    }, categoryItemParent(height or 28))
 if className == "TextButton" then
     row.AutoButtonColor = false
     row.Text = ""
 end
 bind(row, "BackgroundColor3", "Row")
 bindGlass(row)
+addGradient(row, function(t)
+    return makeGradientSequence(t.Row, t.Row:Lerp(t.Accent, 0.12))
+end)
 return row
 end
 
@@ -2683,7 +3093,7 @@ function CategoryElements:CreateLabel(Text, IconName, TextColor)
         BackgroundTransparency = 1,
         Size = UDim2.new(1, 0, 0, 26),
         LayoutOrder = nextOrder(),
-    }, CategoryPage)
+    }, categoryItemParent(26))
 local x = 0
 local asset = resolveIcon(IconName)
 if asset then
@@ -2763,13 +3173,22 @@ function CategoryElements:CreateTextbox(TextboxText, IconName, Placeholder, Flag
         restored = SavedFlags[Flag]
     end
 
-    local row = newRow("Frame")
+    local row = newRow("Frame", useTwoColumns and 48 or 28)
     local marker, hasIcon = addMarker(row, IconName)
-    local lbl = addLabel(row, TextboxText, hasIcon and 32 or 30, 1, 158)
+    local textboxWidth = useTwoColumns and 118 or 150
+    local lbl = addLabel(row, TextboxText, hasIcon and 32 or 30, 1, textboxWidth + 8)
     bind(lbl, "TextColor3", "Ink")
     if hasIcon then bind(marker, "ImageColor3", "Accent") else bind(marker, "BackgroundColor3", "Accent") end
 
-    local tb = inputBox(row, Placeholder, restored ~= nil and tostring(restored) or "")
+    local tb = inputBox(row, Placeholder, restored ~= nil and tostring(restored) or "", textboxWidth)
+    if useTwoColumns then
+        lbl.Position = UDim2.new(0, hasIcon and 32 or 24, 0, 0)
+        lbl.Size = UDim2.new(1, hasIcon and -44 or -34, 0, 20)
+        marker.Position = UDim2.new(0, 7, 0, hasIcon and 2 or 4)
+        tb.Parent.AnchorPoint = Vector2.new(0, 0)
+        tb.Parent.Position = UDim2.fromOffset(8, 24)
+        tb.Parent.Size = UDim2.new(1, -16, 0, 20)
+    end
     if Flag then
         Flags[Flag] = { Type = "Textbox", Value = tb.Text }
     end
@@ -2805,13 +3224,22 @@ function CategoryElements:CreateNumberTextbox(LabelText, IconName, DefaultNumber
         DefaultNumber = SavedFlags[Flag]
     end
 
-    local row = newRow("Frame")
+    local row = newRow("Frame", useTwoColumns and 48 or 28)
     local marker, hasIcon = addMarker(row, IconName)
-    local lbl = addLabel(row, LabelText, hasIcon and 32 or 30, 1, 158)
+    local textboxWidth = useTwoColumns and 118 or 150
+    local lbl = addLabel(row, LabelText, hasIcon and 32 or 30, 1, textboxWidth + 8)
     bind(lbl, "TextColor3", "Ink")
     if hasIcon then bind(marker, "ImageColor3", "Accent") else bind(marker, "BackgroundColor3", "Accent") end
 
-    local tb = inputBox(row, tostring(DefaultNumber or ""), DefaultNumber and tostring(DefaultNumber) or "")
+    local tb = inputBox(row, tostring(DefaultNumber or ""), DefaultNumber and tostring(DefaultNumber) or "", textboxWidth)
+    if useTwoColumns then
+        lbl.Position = UDim2.new(0, hasIcon and 32 or 24, 0, 0)
+        lbl.Size = UDim2.new(1, hasIcon and -44 or -34, 0, 20)
+        marker.Position = UDim2.new(0, 7, 0, hasIcon and 2 or 4)
+        tb.Parent.AnchorPoint = Vector2.new(0, 0)
+        tb.Parent.Position = UDim2.fromOffset(8, 24)
+        tb.Parent.Size = UDim2.new(1, -16, 0, 20)
+    end
     if Flag then
         Flags[Flag] = { Type = "NumberTextbox", Value = tonumber(tb.Text) }
     end
@@ -3003,7 +3431,7 @@ local function layout()
         x = x + 22
     end
     lbl.Position = UDim2.new(0, x, 0, 0)
-    lbl.Size = UDim2.new(1, -(x + 140), 1, 0)
+    lbl.Size = UDim2.new(1, -(x + (useTwoColumns and 108 or 140)), 1, 0)
 end
 
 local track = new("Frame", {
@@ -3623,10 +4051,447 @@ function CategoryElements:CreateMultiDropdown(DropdownText, IconName, Options, D
     return buildDropdown(true, DropdownText, IconName, Options, DefaultSelected, Flag, Callback)
 end
 
+-- Optional layout helpers. Each one creates a real, themed component and returns
+-- a small controller so scripts can update or remove it after creation.
+function CategoryElements:CreateSection(Title, Subtitle)
+    Title = tostring(Title or "SECTION")
+    local hasSubtitle = Subtitle ~= nil and tostring(Subtitle) ~= ""
+    local height = hasSubtitle and 50 or 32
+    local holder = new("Frame", {
+        Name = "ExtensionSection",
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, height),
+        LayoutOrder = nextOrder(),
+    }, categoryItemParent(height))
+
+    local headingLabel = new("TextLabel", {
+        Name = "SectionTitle",
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(0, 1),
+        Size = UDim2.new(1, 0, 0, 20),
+        Text = Title,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, holder)
+    bindFont(headingLabel, 14, true)
+    bind(headingLabel, "TextColor3", "Accent")
+
+    local subtitleLabel
+    if hasSubtitle then
+        subtitleLabel = new("TextLabel", {
+            Name = "SectionDescription",
+            BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(0, 22),
+            Size = UDim2.new(1, 0, 0, 17),
+            Text = tostring(Subtitle),
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+        }, holder)
+        bindFont(subtitleLabel, 10, false)
+        bind(subtitleLabel, "TextColor3", "Ink")
+        subtitleLabel.TextTransparency = 0.18
+    end
+    hline(holder, UDim2.new(0, 0, 1, -2), UDim2.new(1, 0, 0, 1))
+
+    return {
+        Instance = holder,
+        SetTitle = function(_, value) headingLabel.Text = tostring(value or "") end,
+        SetSubtitle = function(_, value)
+            if not subtitleLabel then
+                subtitleLabel = new("TextLabel", {
+                    Name = "SectionDescription",
+                    BackgroundTransparency = 1,
+                    Position = UDim2.fromOffset(0, 22),
+                    Size = UDim2.new(1, 0, 0, 17),
+                    TextXAlignment = Enum.TextXAlignment.Left,
+                    TextTruncate = Enum.TextTruncate.AtEnd,
+                }, holder)
+                bindFont(subtitleLabel, 10, false)
+                bind(subtitleLabel, "TextColor3", "Ink")
+                subtitleLabel.TextTransparency = 0.18
+            end
+            local valueText = tostring(value or "")
+            subtitleLabel.Text = valueText
+            subtitleLabel.Visible = valueText ~= ""
+            holder.Size = UDim2.new(1, 0, 0, valueText ~= "" and 50 or 32)
+        end,
+        Destroy = function() if holder.Parent then holder:Destroy() end end,
+    }
+end
+
+function CategoryElements:CreateDivider(LabelText)
+    local holder = new("Frame", {
+        Name = "ExtensionDivider",
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 20),
+        LayoutOrder = nextOrder(),
+    }, categoryItemParent(20))
+    local label = new("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(0, 0),
+        Size = UDim2.new(1, 0, 1, 0),
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Visible = LabelText ~= nil and tostring(LabelText) ~= "",
+    }, holder)
+    bindFont(label, 9, true)
+    bind(label, "TextColor3", "Line")
+    local line = hline(holder, UDim2.new(0, 0, 0.5, 0), UDim2.new(1, 0, 0, 1))
+
+    local function setLabel(value)
+        local valueText = value ~= nil and tostring(value) or ""
+        label.Text = string.upper(valueText)
+        label.Visible = valueText ~= ""
+        line.Position = label.Visible and UDim2.new(0, 0, 1, -1) or UDim2.new(0, 0, 0.5, 0)
+        return true
+    end
+    setLabel(LabelText)
+    return {
+        Instance = holder,
+        SetLabel = function(_, value) return setLabel(value) end,
+        Destroy = function() if holder.Parent then holder:Destroy() end end,
+    }
+end
+
+function CategoryElements:CreateSpacer(Height)
+    local value = math.clamp(tonumber(Height) or 8, 2, 80)
+    local spacer = new("Frame", {
+        Name = "ExtensionSpacer",
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Size = UDim2.new(1, 0, 0, value),
+        LayoutOrder = nextOrder(),
+    }, categoryItemParent(value))
+    return {
+        Instance = spacer,
+        SetHeight = function(_, newHeight)
+            local n = tonumber(newHeight)
+            if n then
+                value = math.clamp(n, 2, 80)
+                spacer.Size = UDim2.new(1, 0, 0, value)
+            end
+        end,
+        Destroy = function() if spacer.Parent then spacer:Destroy() end end,
+    }
+end
+
+function CategoryElements:CreateParagraph(Title, Text)
+    local titleText = tostring(Title or "")
+    local bodyText = tostring(Text or "")
+    local holder = newRow("Frame", 58)
+    holder.Name = "ExtensionParagraph"
+    holder.ClipsDescendants = true
+
+    local titleLabel
+    if titleText ~= "" then
+        titleLabel = new("TextLabel", {
+            Name = "ParagraphTitle",
+            BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(12, 7),
+            Size = UDim2.new(1, -24, 0, 18),
+            Text = titleText,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+        }, holder)
+        bindFont(titleLabel, 12, true)
+        bind(titleLabel, "TextColor3", "Accent")
+    end
+
+    local bodyLabel = new("TextLabel", {
+        Name = "ParagraphText",
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(12, titleText ~= "" and 28 or 9),
+        Size = UDim2.new(1, -24, 0, 24),
+        Text = bodyText,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        TextWrapped = true,
+    }, holder)
+    bindFont(bodyLabel, 11, false)
+    bind(bodyLabel, "TextColor3", "Ink")
+
+    local function resizeParagraph()
+        if not holder.Parent then return end
+        local availableWidth
+        if useTwoColumns then
+            local parentWidth = holder.Parent and holder.Parent.AbsoluteSize.X or CategoryPage.AbsoluteSize.X
+            availableWidth = math.max(96, (parentWidth > 0 and parentWidth or 240) - 28)
+        else
+            availableWidth = math.max(120, (CategoryPage.AbsoluteSize.X > 0 and CategoryPage.AbsoluteSize.X or 360) - 52)
+        end
+        local preset = FontPresets[FontFamily] or FontPresets.Gotham
+        local size = math.max(9, math.floor(11 * FontScale + 0.5))
+        local ok, bounds = pcall(function()
+            return TextService:GetTextSize(bodyLabel.Text, size, preset.Regular, Vector2.new(availableWidth, 1000))
+        end)
+        local bodyHeight = ok and math.max(18, bounds.Y) or 36
+        bodyLabel.Size = UDim2.new(1, -24, 0, bodyHeight)
+        local top = titleText ~= "" and 28 or 9
+        bodyLabel.Position = UDim2.fromOffset(12, top)
+        holder.Size = UDim2.new(1, 0, 0, top + bodyHeight + 10)
+    end
+    resizeParagraph()
+    local resizeConnection = connect(holder.Parent:GetPropertyChangedSignal("AbsoluteSize"), resizeParagraph)
+
+    return {
+        Instance = holder,
+        SetText = function(_, value)
+            bodyLabel.Text = tostring(value or "")
+            resizeParagraph()
+        end,
+        SetTitle = function(_, value)
+            titleText = tostring(value or "")
+            if titleText == "" and titleLabel then
+                titleLabel:Destroy()
+                titleLabel = nil
+            elseif titleText ~= "" and not titleLabel then
+                titleLabel = new("TextLabel", {
+                    Name = "ParagraphTitle",
+                    BackgroundTransparency = 1,
+                    Position = UDim2.fromOffset(12, 7),
+                    Size = UDim2.new(1, -24, 0, 18),
+                    Text = titleText,
+                    TextXAlignment = Enum.TextXAlignment.Left,
+                    TextTruncate = Enum.TextTruncate.AtEnd,
+                }, holder)
+                bindFont(titleLabel, 12, true)
+                bind(titleLabel, "TextColor3", "Accent")
+            elseif titleLabel then
+                titleLabel.Text = titleText
+            end
+            resizeParagraph()
+        end,
+        Destroy = function()
+            if resizeConnection then resizeConnection:Disconnect(); resizeConnection = nil end
+            if holder.Parent then holder:Destroy() end
+        end,
+    }
+end
+
+function CategoryElements:CreateBadge(LabelText, BadgeText, BadgeColor)
+    local holder = new("Frame", {
+        Name = "ExtensionBadgeRow",
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 28),
+        LayoutOrder = nextOrder(),
+    }, categoryItemParent(28))
+    local label = new("TextLabel", {
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, -112, 1, 0),
+        Text = tostring(LabelText or "Status"),
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, holder)
+    bindFont(label, 12, false)
+    bind(label, "TextColor3", "Ink")
+
+    local pill = new("Frame", {
+        Name = "BadgePill",
+        AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, 0, 0.5, 0),
+        Size = UDim2.fromOffset(96, 21),
+        BorderSizePixel = 0,
+    }, holder)
+    local color = typeof(BadgeColor) == "Color3" and BadgeColor or Theme.Accent
+    pill.BackgroundColor3 = color:Lerp(Theme.Paper, 0.22)
+    local stroke = new("UIStroke", { Thickness = 1, Transparency = 0.45 }, pill)
+    stroke.Color = color
+    local pillText = new("TextLabel", {
+        BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        Text = tostring(BadgeText or "READY"),
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, pill)
+    bindFont(pillText, 9, true)
+    pillText.TextColor3 = color
+
+    local function setBadgeColor(nextColor)
+        if typeof(nextColor) ~= "Color3" then return false end
+        color = nextColor
+        pill.BackgroundColor3 = color:Lerp(Theme.Paper, 0.22)
+        stroke.Color = color
+        pillText.TextColor3 = color
+        return true
+    end
+    return {
+        Instance = holder,
+        SetLabel = function(_, value) label.Text = tostring(value or "") end,
+        SetText = function(_, value) pillText.Text = tostring(value or "") end,
+        SetColor = function(_, value) return setBadgeColor(value) end,
+        Destroy = function() if holder.Parent then holder:Destroy() end end,
+    }
+end
+
+function CategoryElements:CreateProgressBar(Title, DefaultValue, MaxValue, BarColor)
+    local maximum = math.max(tonumber(MaxValue) or 100, 0.0001)
+    local value = math.clamp(tonumber(DefaultValue) or 0, 0, maximum)
+    local holder = newRow("Frame", 43)
+    holder.Name = "ExtensionProgressBar"
+    local titleLabel = new("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(10, 4),
+        Size = UDim2.new(1, -20, 0, 16),
+        Text = tostring(Title or "Progress"),
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, holder)
+    bindFont(titleLabel, 11, true)
+    bind(titleLabel, "TextColor3", "Ink")
+
+    local track = new("Frame", {
+        Name = "Track",
+        Position = UDim2.new(0, 10, 1, -13),
+        Size = UDim2.new(1, -20, 0, 5),
+        BorderSizePixel = 0,
+    }, holder)
+    bind(track, "BackgroundColor3", "Line")
+    local fill = new("Frame", {
+        Name = "Fill",
+        Size = UDim2.new(value / maximum, 0, 1, 0),
+        BorderSizePixel = 0,
+        BackgroundColor3 = typeof(BarColor) == "Color3" and BarColor or Theme.Accent,
+    }, track)
+    local function update(nextValue)
+        local numeric = tonumber(nextValue)
+        if not numeric then return false end
+        value = math.clamp(numeric, 0, maximum)
+        tw(fill, 0.18, { Size = UDim2.new(value / maximum, 0, 1, 0) })
+        return true
+    end
+    return {
+        Instance = holder,
+        SetValue = function(_, nextValue) return update(nextValue) end,
+        GetValue = function() return value end,
+        SetMax = function(_, nextMax)
+            local numeric = tonumber(nextMax)
+            if not numeric or numeric <= 0 then return false end
+            maximum = numeric
+            update(value)
+            return true
+        end,
+        SetTitle = function(_, nextTitle) titleLabel.Text = tostring(nextTitle or "") end,
+        SetColor = function(_, nextColor)
+            if typeof(nextColor) ~= "Color3" then return false end
+            fill.BackgroundColor3 = nextColor
+            return true
+        end,
+        Destroy = function() if holder.Parent then holder:Destroy() end end,
+    }
+end
+
+function CategoryElements:CreateActionCard(Title, Description, ButtonText, Callback)
+    local holder = newRow("Frame", 62)
+    holder.Name = "ExtensionActionCard"
+    local titleLabel = new("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(11, 7),
+        Size = UDim2.new(1, -118, 0, 17),
+        Text = tostring(Title or "Action"),
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, holder)
+    bindFont(titleLabel, 11, true)
+    bind(titleLabel, "TextColor3", "Ink")
+    local descriptionLabel = new("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(11, 27),
+        Size = UDim2.new(1, -118, 0, 25),
+        Text = tostring(Description or ""),
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        TextWrapped = true,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, holder)
+    bindFont(descriptionLabel, 9, false)
+    bind(descriptionLabel, "TextColor3", "Ink")
+    descriptionLabel.TextTransparency = 0.18
+
+    local action = new("TextButton", {
+        Name = "ActionButton",
+        AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -9, 0.5, 0),
+        Size = UDim2.fromOffset(92, 27),
+        BorderSizePixel = 0,
+        AutoButtonColor = false,
+        Text = tostring(ButtonText or "RUN"),
+    }, holder)
+    bind(action, "BackgroundColor3", "Accent")
+    bind(action, "TextColor3", "Cream")
+    bindFont(action, 9, true)
+    local enabled = true
+    local callback = Callback
+    connect(action.MouseEnter, function()
+        if enabled then tw(action, 0.12, { BackgroundColor3 = Theme.Team }) end
+    end)
+    connect(action.MouseLeave, function()
+        tw(action, 0.12, { BackgroundColor3 = Theme.Accent })
+    end)
+    connect(action.MouseButton1Click, function()
+        if not enabled then return end
+        if Library._sfx then Library._sfx("select") end
+        if type(callback) == "function" then
+            task.spawn(function()
+                local ok, err = pcall(callback)
+                if not ok then Notify("Extension action failed: " .. tostring(err), 4) end
+            end)
+        end
+    end)
+    return {
+        Instance = holder,
+        SetTitle = function(_, value) titleLabel.Text = tostring(value or "") end,
+        SetDescription = function(_, value) descriptionLabel.Text = tostring(value or "") end,
+        SetButtonText = function(_, value) action.Text = tostring(value or "") end,
+        SetCallback = function(_, value)
+            if type(value) ~= "function" and value ~= nil then return false end
+            callback = value
+            return true
+        end,
+        SetEnabled = function(_, state)
+            enabled = state == true
+            action.Active = enabled
+            action.BackgroundTransparency = enabled and 0 or 0.55
+            action.TextTransparency = enabled and 0 or 0.35
+            return enabled
+        end,
+        Destroy = function() if holder.Parent then holder:Destroy() end end,
+    }
+end
+
+function CategoryElements:CreateCustomFrame(Name, Height, Options)
+    Options = type(Options) == "table" and Options or {}
+    local frame = new("Frame", {
+        Name = tostring(Name or "CustomExtensionFrame"),
+        Size = UDim2.new(1, 0, 0, math.clamp(tonumber(Height) or 72, 24, 500)),
+        BorderSizePixel = 0,
+        BackgroundTransparency = Options.BackgroundTransparency ~= nil and math.clamp(tonumber(Options.BackgroundTransparency) or 0, 0, 1) or GTrans,
+        LayoutOrder = nextOrder(),
+        ClipsDescendants = Options.ClipsDescendants == true,
+    }, categoryItemParent(math.clamp(tonumber(Height) or 72, 24, 500)))
+    if typeof(Options.BackgroundColor3) == "Color3" then
+        frame.BackgroundColor3 = Options.BackgroundColor3
+    else
+        bind(frame, "BackgroundColor3", type(Options.ThemeColor) == "string" and Theme[Options.ThemeColor] and Options.ThemeColor or "Row")
+    end
+    if Options.Glass == true or (Options.Glass ~= false and Options.BackgroundTransparency == nil) then
+        bindGlass(frame)
+    end
+    if Options.Gradient == true then
+        addGradient(frame, function(t) return makeGradientSequence(t.Row, t.Row:Lerp(t.Accent, 0.18)) end)
+    end
+    return frame
+end
+
 return CategoryElements, CategoryPage, btn
 end
 
 WindowElements.Flags = Flags
+WindowElements.Layout = { ify = layout.ify, ActiveColumns = useTwoColumns and 2 or 1 }
+function WindowElements:GetLayoutMode()
+    return layout.ify
+end
+function WindowElements:GetActiveColumnCount()
+    return useTwoColumns and 2 or 1
+end
 WindowElements.ApplyTeamColor = function(instance, property)
     bind(instance, property or "BackgroundColor3", "Team")
 end
@@ -3646,6 +4511,42 @@ WindowElements.GetTheme = function()
     local copy = {}
     for k, v in pairs(Theme) do copy[k] = v end
     return copy
+end
+
+function WindowElements:SetThemeColor(token, color)
+    local allowed = { Paper = true, Row = true, Input = true, Accent = true, Ink = true, Cream = true, Line = true, Team = true }
+    if not allowed[token] or typeof(color) ~= "Color3" then return false end
+    runThemeTransition(function()
+        Theme[token] = color
+        refreshTheme()
+        persistTheme()
+        save()
+    end)
+    return true
+end
+
+function WindowElements:GetThemeColor(token)
+    return Theme[token]
+end
+
+function WindowElements:CreateExtensionCategory(name, iconName, hidden)
+    return self:CreateCategory(name, iconName, hidden)
+end
+
+function WindowElements:RunExtension(name, ...)
+    local callback = Library:GetExtension(name)
+    if type(callback) ~= "function" then
+        return false, "Extension is not registered: " .. tostring(name)
+    end
+    local args = table.pack(...)
+    local ok, result = pcall(function()
+        return callback(self, Library, table.unpack(args, 1, args.n))
+    end)
+    if not ok then
+        Notify("Extension '" .. tostring(name) .. "' failed: " .. tostring(result), 5)
+        return false, result
+    end
+    return true, result
 end
 
 function WindowElements:Notify(text, duration, opts)
@@ -3715,6 +4616,34 @@ function WindowElements:SetMobileStyle(name)
     SetMobileStyle(name)
     save()
 end
+function WindowElements:SetDragDelay(milliseconds)
+    if setDragDelay(milliseconds) then
+        save()
+        return true
+    end
+    return false
+end
+function WindowElements:GetDragDelay()
+    return DragDelayMs
+end
+function WindowElements:SetGradientEffects(enabled)
+    setGradientEffects(enabled)
+    save()
+    return GradientEffectsEnabled
+end
+function WindowElements:GetGradientEffects()
+    return GradientEffectsEnabled
+end
+function WindowElements:SetGradientDirection(direction)
+    if setGradientDirection(direction) then
+        save()
+        return true
+    end
+    return false
+end
+function WindowElements:GetGradientDirection()
+    return GradientDirection
+end
 
 if Config.ShowSettingsTab ~= false then
     task.defer(function()
@@ -3753,6 +4682,7 @@ if Config.ShowSettingsTab ~= false then
 
         local TransPercent = math.floor(GTrans * 100 + 0.5)
         local volumeSaveToken = 0
+        local dragDelaySaveToken = 0
         local BuildSettingsUI
 
         local function applyPreset(name)
@@ -3792,6 +4722,25 @@ if Config.ShowSettingsTab ~= false then
                 OpenCloseAnimation = selected
                 persistTheme()
                 save()
+            end)
+
+            SettingsTab:CreateToggle("Gradient Effects", "lucide-palette", GradientEffectsEnabled, function(enabled)
+                setGradientEffects(enabled)
+                save()
+            end)
+
+            SettingsTab:CreateDropdown("Gradient Direction", "lucide-palette", GradientDirectionOrder, GradientDirection, nil, function(selected)
+                if setGradientDirection(selected) then save() end
+            end)
+
+            SettingsTab:CreateSlider("Drag Hold Delay (ms)", "lucide-move", 0, 600, DragDelayMs, function(value)
+                if setDragDelay(value) then
+                    dragDelaySaveToken += 1
+                    local token = dragDelaySaveToken
+                    task.delay(0.4, function()
+                        if token == dragDelaySaveToken then save() end
+                    end)
+                end
             end)
 
             local fontFamilyOptions = {}
@@ -4167,6 +5116,39 @@ if Config.ShowIntro ~= false then
             if overlay.Parent then closeIntro() end
         end)
     end)
+end
+
+-- Extensions are opt-in. Config.Extensions may contain registered names,
+-- direct callbacks, or records: { Name = "Name", Enabled = true, Run = function(...) end }.
+if type(Config.Extensions) == "table" then
+    for key, entry in pairs(Config.Extensions) do
+        local extensionName = nil
+        local extensionCallback = nil
+        local enabled = true
+
+        if type(entry) == "string" then
+            extensionName = entry
+        elseif type(entry) == "function" then
+            extensionName = "InlineExtension_" .. tostring(key)
+            extensionCallback = entry
+        elseif type(entry) == "table" then
+            extensionName = tostring(entry.Name or key)
+            enabled = entry.Enabled ~= false
+            extensionCallback = entry.Run or entry.Callback
+        elseif type(key) == "string" and entry == true then
+            extensionName = key
+        end
+
+        if enabled and extensionName then
+            extensionCallback = type(extensionCallback) == "function" and extensionCallback or Library:GetExtension(extensionName)
+            if type(extensionCallback) == "function" then
+                local ok, err = pcall(extensionCallback, WindowElements, Library)
+                if not ok then
+                    Notify("Extension '" .. extensionName .. "' failed: " .. tostring(err), 5)
+                end
+            end
+        end
+    end
 end
 
 if Config.StartOpen ~= false then
