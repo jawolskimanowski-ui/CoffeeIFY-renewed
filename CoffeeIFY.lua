@@ -1402,7 +1402,7 @@ local stripHost = new("Frame", {
     BackgroundTransparency = 1,
     ClipsDescendants = true,
     Visible = false,
-    ZIndex = 60,
+    ZIndex = 1001,
 }, gui)
 stripUIScale = new("UIScale", { Scale = OverallScalePercent / 100 }, stripHost)
 local rng = Random.new()
@@ -1490,14 +1490,14 @@ local function buildStrips(W, H, collapsed, variant)
         local band = new("Frame", {
             BackgroundTransparency = 1,
             ClipsDescendants = true,
-            ZIndex = 60,
+            ZIndex = 1001,
             Position = collapsed and UDim2.fromOffset(0, r * H) or UDim2.fromOffset(0, 0),
             Size = collapsed and UDim2.fromOffset(W, 0) or UDim2.fromOffset(W, H),
         }, stripHost)
     local bar = new("Frame", {
         AnchorPoint = Vector2.new(0.5, 0.5),
         BorderSizePixel = 0,
-        ZIndex = 60,
+        ZIndex = 1001,
         Position = UDim2.fromOffset(xc, H / 2 - (collapsed and r * H or 0)),
         Size = UDim2.fromOffset(barWidth, H * 1.8),
         Rotation = stripAngle,
@@ -2294,7 +2294,7 @@ local function Notify(text, duration, opts)
                         BorderSizePixel = 0,
                         Size = UDim2.fromOffset(sw, sh),
                         Position = UDim2.fromOffset(sx, sy),
-                        ZIndex = 60,
+                        ZIndex = 1001,
                         Parent = target,
                     })
                     table.insert(spots, spot)
